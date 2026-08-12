@@ -48,6 +48,7 @@ Prompt memory is optional and page-session scoped. Prompt fields are unchecked i
 - Status Pro retains at most 100 history records and the latest 300 callback step observations per observed generation phase session.
 - Browser polling can differ slightly from WanGP's internal terminal timings.
 - Detailed download reporting depends on plugin-observed WanGP and Hugging Face activity; its absence does not affect downloading or generation.
+- Import Media from an imported History JSON will add in the same manner as adding media without extended JSON details.  
 
 ## Installation
 
