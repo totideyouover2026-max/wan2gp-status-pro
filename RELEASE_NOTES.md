@@ -35,7 +35,7 @@ Prompt memory is optional and page-session scoped. Prompt fields are unchecked i
 
 ## Compatibility
 
-- Requires WanGP 12.452 or later.
+- Built and Tested on WanGP 12.452 or later. Older versions may still be compatible but it can not be guaranteed.
 - No additional required Python dependencies.
 - Process-memory telemetry uses `psutil` when it is already available through WanGP and otherwise degrades gracefully.
 - Detailed model-download telemetry is plugin-local and fails open: generation continues normally if WanGP or Hugging Face changes an observed internal interface.
