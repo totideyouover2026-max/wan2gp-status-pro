@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+*.log
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+.DS_Store
+Thumbs.db
+FUTURE_IMPROVEMENTS.md
+RELEASE_CHECKLIST.md
+/Screenshots/
