@@ -4,7 +4,7 @@ Status Pro replaces Wan2GP's main status presentation with a responsive pipeline
 
 ![Status Pro V1 overview showing live pipeline tracking, timing metrics, and browser-local history](SlideDeck/1.png)
 
-Status Pro 1.0.0 targets **WanGP 12.452 or later**. It has no additional required Python dependencies; process-memory telemetry uses `psutil` when WanGP already provides it and degrades gracefully when unavailable.
+Status Pro 1.0.1 has been tested with **WanGP 12.452 and later**, but does not declare a hard minimum because its observers degrade gracefully and may also work with earlier releases. It has no additional required Python dependencies; process-memory telemetry uses `psutil` when WanGP already provides it and degrades gracefully when unavailable.
 
 [User guide](USER_GUIDE.md) · [Installation](#install-and-enable) · [Release notes](RELEASE_NOTES.md)
 
@@ -17,6 +17,7 @@ Status Pro 1.0.0 targets **WanGP 12.452 or later**. It has no additional require
 - JSON, CSV, and Markdown exports, plus restoration of Status Pro JSON history.
 - Responsive full, narrow, and collapsed layouts that remain available throughout a run.
 - Privacy controls for history lifetime, prompt memory, and share-safe exports.
+- An option to disable automatic History recording while retaining the live stage-based status display.
 
 ## Visual tour
 
@@ -93,6 +94,7 @@ For a practical explanation of every stage, History, storage modes, exports, and
 - Lets you clear selected history rows without removing the rest of the locally stored ledger.
 - Keeps history in a dedicated header-controlled drawer that remains accessible during generation, with This session/All history filtering, a settings action, direct export using the saved defaults, and a large synchronized modal workspace for busy ledgers.
 - Offers three history lifetimes from the settings window's top bar: until manually cleared, until the browser tab closes, or until WanGP restarts. New installations default to WanGP-restart-aware storage.
+- Allows automatic History recording to be turned off without disabling live stage tracking or deleting existing records.
 - Explains every retention choice in a confirmation box before switching modes.
 - Keeps prompts out of the default export preset and offers a privacy setting for page-session prompt memory. The preference can persist, but prompt text never outlives its selected browser-session boundary and is removed immediately when prompt memory is disabled.
 - Uses compact, content-sized stage cards whose layout responds to available width; half-width views keep the selected stage expanded and reduce other stages to accessible tick/number buttons.
@@ -122,6 +124,9 @@ For a practical explanation of every stage, History, storage modes, exports, and
 - Records actual cache-skip events from Wan2GP's TeaCache, MagCache, Spectrum, and First Block Cache counters instead of inferring skips from unusually fast steps.
 - Samples Wan2GP process RAM and active CUDA-device memory throughout each run, retains peak/average/start/end summaries, and attaches boundary samples to the per-step history.
 - Adds a scrollable step-performance table to expanded history entries and dedicated performance/resource fields to JSON, CSV, and Markdown exports.
+- Highlights the fastest and slowest valid step within each observed pass, while excluding skipped observations from that comparison.
+- Adds a measured stage-timing composition bar with a theme-aware striped segment for wall-clock time not covered by observed stages.
+- Uses clearer, top-aligned field labels in expanded History and shows compact filename-only LoRA names while preserving complete values in exports.
 - Treats Wan2GP's transition into Decode as completion of its final reported generation step, avoiding a misleading 7/8 finish.
 - Shows remaining time only where live progress supports it: downloads, denoising, and post-processing tasks that report incremental progress.
 - Never displays speculative durations for pending stages.

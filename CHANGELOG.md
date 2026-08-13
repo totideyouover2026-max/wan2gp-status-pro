@@ -2,6 +2,21 @@
 
 All notable Status Pro changes will be recorded here. Versions follow Semantic Versioning.
 
+## [1.0.1] - 2026-08-13
+
+### Added
+
+- **Do not record new runs** in History settings. Live stages, elapsed timing, ETA, and current performance remain active; completed runs are not added to the ledger while recording is off, and existing records remain unchanged.
+- A measured timing-composition bar in expanded History, with consistent stage colours and a theme-aware striped segment for unaccounted wall time.
+- Fastest and slowest valid step highlighting within each observed pass, excluding skipped observations.
+
+### Changed
+
+- Removed the hard WanGP version requirement from plugin metadata. WanGP 12.452 remains the tested baseline, while earlier releases may still work and newer version numbering no longer produces a misleading incompatibility badge.
+- Expanded-record labels are clearer and aligned to the top for faster scanning across responsive layouts.
+- Visible LoRA values use filename-only names without `.safetensors`, one per line, while complete captured values remain available in tooltips and exports.
+- Added regression coverage for History recording preferences, timing composition, per-pass step outliers, and LoRA display formatting.
+
 ## [1.0.0] - 2026-08-12
 
 ### Added

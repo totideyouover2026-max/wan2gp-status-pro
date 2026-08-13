@@ -595,7 +595,7 @@ class StatusProPlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = "Status Pro"
-        self.version = "1.0.0"
+        self.version = "1.0.1"
         self.description = (
             "Selectable pipeline timeline with stage timings and live ETA estimates."
         )
@@ -1182,7 +1182,7 @@ class StatusProPlugin(WAN2GPPlugin):
         <span data-sp-eta></span>
       </div>
       <button class="status-pro__history-toggle" data-sp-history-toggle type="button" aria-expanded="false" aria-controls="status-pro-history-drawer">
-        History <span data-sp-history-count>0</span>
+        <span data-sp-history-label>History</span> <span data-sp-history-count>0</span>
       </button>
     <button class="status-pro__collapse" data-sp-collapse type="button" aria-expanded="true" title="Collapse Status Pro">▼</button>
     </div>
@@ -1280,9 +1280,10 @@ class StatusProPlugin(WAN2GPPlugin):
             <span data-sp-export-scope>Choose history, privacy, and export defaults.</span>
           </div>
           <div class="status-pro__export-header-actions">
-            <label class="status-pro__history-persistence" title="Choose when Status Pro automatically clears generation history">
-              <span>Keep History</span>
+            <label class="status-pro__history-persistence" title="Choose whether Status Pro records completed runs and how long it keeps them">
+              <span>History</span>
               <select data-sp-history-persistence aria-label="History persistence">
+                <option value="off">Do not record new runs</option>
                 <option value="persistent">Until manually cleared</option>
                 <option value="browser">Until browser tab closes</option>
                 <option value="runtime">Until WanGP restarts</option>
@@ -1357,6 +1358,7 @@ class StatusProPlugin(WAN2GPPlugin):
     const RUNTIME_RUN_HISTORY_KEY = "wangp.status-pro.run-history.runtime.v1";
     const HISTORY_RUNTIME_ID_KEY = "wangp.status-pro.history-runtime-id.v1";
     const HISTORY_PERSISTENCE_KEY = "wangp.status-pro.history-persistence.v1";
+    const HISTORY_RECORDING_KEY = "wangp.status-pro.history-recording.v1";
     const COLLAPSED_KEY = "wangp.status-pro.collapsed.v1";
     const EXPORT_FIELDS_KEY = "wangp.status-pro.export-fields.v1";
     const EXPORT_SETTINGS_KEY = "wangp.status-pro.export-settings.v1";
@@ -1503,6 +1505,7 @@ class StatusProPlugin(WAN2GPPlugin):
     --sp-accent-strong: var(--primary-600, #0284c7);
     --sp-good: #22c55e;
     --sp-muted: var(--body-text-color-subdued, #94a3b8);
+    --sp-text: var(--body-text-color, #f8fafc);
     --sp-panel: var(--block-background-fill, #1e293b);
     --sp-panel-soft: var(--background-fill-secondary, #0f172a);
     --sp-border: var(--border-color-primary, #334155);
@@ -1562,7 +1565,7 @@ class StatusProPlugin(WAN2GPPlugin):
     font-size: .7rem;
     font-weight: 650;
 }
-.status-pro__history-toggle span {
+.status-pro__history-toggle [data-sp-history-count] {
     display: inline-grid;
     min-width: 18px;
     min-height: 18px;
@@ -1572,6 +1575,10 @@ class StatusProPlugin(WAN2GPPlugin):
     background: color-mix(in srgb, var(--sp-accent) 18%, transparent);
     color: var(--body-text-color, #f8fafc);
     font-variant-numeric: tabular-nums;
+}
+.status-pro__history-toggle[data-recording="off"] {
+    border-style: dashed;
+    color: var(--sp-muted);
 }
 .status-pro__history-toggle[aria-expanded="true"] {
     border-color: var(--sp-accent);
@@ -2216,20 +2223,35 @@ class StatusProPlugin(WAN2GPPlugin):
 }
 .status-pro__run-fields {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-    gap: 8px 14px;
+    grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+    align-items: start;
+    gap: 9px 12px;
     padding-top: 9px;
 }
-.status-pro__run-field { display: grid; gap: 1px; min-width: 0; }
+.status-pro__run-field {
+    display: grid;
+    align-content: start;
+    align-self: start;
+    gap: 4px;
+    min-width: 0;
+}
 .status-pro__run-field dt {
-    color: var(--sp-muted);
+    min-height: 2.15em;
+    padding: 3px 6px;
+    border-radius: 4px;
+    background: color-mix(in srgb, var(--sp-accent) 9%, var(--sp-panel-soft));
+    color: color-mix(in srgb, var(--sp-accent) 62%, var(--sp-text));
     font-size: .62rem;
+    font-weight: 700;
+    line-height: 1.15;
     text-transform: uppercase;
 }
 .status-pro__run-field dd {
     overflow-wrap: anywhere;
     margin: 0;
     font-size: .72rem;
+    line-height: 1.3;
+    white-space: pre-line;
 }
 .status-pro__run-field-actions {
     display: flex;
@@ -2247,12 +2269,65 @@ class StatusProPlugin(WAN2GPPlugin):
     flex-wrap: wrap;
 }
 .status-pro__stage-breakdown span {
+    --sp-stage-color: var(--sp-muted);
     padding: 3px 7px;
-    border: 1px solid var(--sp-border);
+    border: 1px solid color-mix(in srgb, var(--sp-stage-color) 55%, var(--sp-border));
     border-radius: 99px;
-    color: var(--sp-muted);
+    background: color-mix(in srgb, var(--sp-stage-color) 11%, var(--sp-panel-soft));
+    color: color-mix(in srgb, var(--sp-stage-color) 72%, var(--sp-text));
     font-size: .67rem;
     font-variant-numeric: tabular-nums;
+}
+.status-pro__stage-breakdown span[data-stage="prepare"] { --sp-stage-color: #3b82f6; }
+.status-pro__stage-breakdown span[data-stage="input"] { --sp-stage-color: #f59e0b; }
+.status-pro__stage-breakdown span[data-stage="encode"] { --sp-stage-color: #8b5cf6; }
+.status-pro__stage-breakdown span[data-stage="denoise"] { --sp-stage-color: #06b6d4; }
+.status-pro__stage-breakdown span[data-stage="decode"] { --sp-stage-color: #a855f7; }
+.status-pro__stage-breakdown span[data-stage="enhance"] { --sp-stage-color: #ec4899; }
+.status-pro__stage-breakdown span[data-stage="save"] { --sp-stage-color: #14b8a6; }
+.status-pro__stage-breakdown span[data-stage="unaccounted"] {
+    border-color: color-mix(in srgb, var(--sp-text) 25%, var(--sp-border));
+    background: repeating-linear-gradient(
+        135deg,
+        color-mix(in srgb, var(--sp-text) 12%, var(--sp-panel-soft)) 0 4px,
+        color-mix(in srgb, var(--sp-text) 3%, var(--sp-panel-soft)) 4px 8px
+    );
+    color: var(--sp-muted);
+}
+.status-pro__timing-overview {
+    display: grid;
+    gap: 5px;
+}
+.status-pro__timing-overview-label {
+    color: var(--sp-muted);
+    font-size: .62rem;
+    font-weight: 700;
+    letter-spacing: .02em;
+    text-transform: uppercase;
+}
+.status-pro__timing-bar {
+    display: flex;
+    width: 100%;
+    height: 8px;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--sp-border) 82%, transparent);
+    border-radius: 99px;
+    background: var(--sp-panel-soft);
+}
+.status-pro__timing-segment { min-width: 2px; }
+.status-pro__timing-segment[data-stage="prepare"] { background: #3b82f6; }
+.status-pro__timing-segment[data-stage="input"] { background: #f59e0b; }
+.status-pro__timing-segment[data-stage="encode"] { background: #8b5cf6; }
+.status-pro__timing-segment[data-stage="denoise"] { background: #06b6d4; }
+.status-pro__timing-segment[data-stage="decode"] { background: #a855f7; }
+.status-pro__timing-segment[data-stage="enhance"] { background: #ec4899; }
+.status-pro__timing-segment[data-stage="save"] { background: #14b8a6; }
+.status-pro__timing-segment[data-stage="unaccounted"] {
+    background: repeating-linear-gradient(
+        135deg,
+        color-mix(in srgb, var(--sp-text) 24%, var(--sp-panel-soft)) 0 4px,
+        color-mix(in srgb, var(--sp-text) 6%, var(--sp-panel-soft)) 4px 8px
+    );
 }
 .status-pro__output-actions {
     display: grid;
@@ -2327,6 +2402,16 @@ class StatusProPlugin(WAN2GPPlugin):
     text-transform: uppercase;
 }
 .status-pro__step-skipped { color: #f59e0b; font-weight: 700; }
+.status-pro__step-fastest {
+    background: color-mix(in srgb, #22c55e 17%, transparent);
+    color: color-mix(in srgb, #22c55e 78%, var(--sp-text));
+    font-weight: 700;
+}
+.status-pro__step-slowest {
+    background: color-mix(in srgb, #ef4444 15%, transparent);
+    color: color-mix(in srgb, #ef4444 72%, var(--sp-text));
+    font-weight: 700;
+}
 .status-pro__badge {
     display: inline-flex;
     align-items: center;
@@ -3318,6 +3403,39 @@ class StatusProPlugin(WAN2GPPlugin):
         return "Keep history until WanGP restarts?\n\nHistory will be associated with the currently running WanGP process and cleared automatically when Status Pro detects a new WanGP launch. It may survive closing and reopening the browser while WanGP keeps running.";
     }
 
+    function loadHistoryRecordingPreference() {
+        try {
+            return window.localStorage.getItem(HISTORY_RECORDING_KEY) !== "0";
+        } catch (_) {
+            return true;
+        }
+    }
+
+    function saveHistoryRecordingPreference(enabled) {
+        try {
+            window.localStorage.setItem(HISTORY_RECORDING_KEY, enabled ? "1" : "0");
+        } catch (_) {
+            // The selected state remains active for this page if storage is unavailable.
+        }
+    }
+
+    function historyRecordingConfirmation(enabled) {
+        return enabled
+            ? "Start recording new runs?\n\nCompleted, aborted, and failed runs will be added to History using the selected retention lifetime."
+            : "Stop recording new runs?\n\nLive Status Pro tracking will continue, but runs completed while this is off will not be added to History. Existing records remain available until cleared under their current retention setting.";
+    }
+
+    function setHistoryRecording(namespace, enabled) {
+        const next = Boolean(enabled);
+        if (next === (namespace.historyRecording !== false)) return;
+        namespace.historyRecording = next;
+        saveHistoryRecordingPreference(next);
+        namespace.historyStorageNotice = next
+            ? "Automatic history recording is on. Future completed, aborted, and failed runs will be recorded."
+            : "Automatic history recording is off. Existing records are unchanged.";
+        namespace.historyRenderKey = null;
+    }
+
     function prepareRuntimeHistory(runtimeId) {
         const current = String(runtimeId || "").trim();
         if (!current) return false;
@@ -4244,6 +4362,12 @@ class StatusProPlugin(WAN2GPPlugin):
         delete run.client_id;
         delete run.window_prompt;
         delete run.window_prompts;
+        if (namespace.historyRecording === false) {
+            namespace.lastCompletedAt = ended;
+            namespace.activeRun = null;
+            resetJob(namespace);
+            return;
+        }
         if (run.settings && (namespace.promptMemory === false || !modeStoresPrompts(namespace.historyPersistence))) {
             if (namespace.promptMemory !== false) cacheRunPrompts(namespace, run);
             stripRunPrompts(run);
@@ -4818,6 +4942,14 @@ class StatusProPlugin(WAN2GPPlugin):
         }
     }
 
+    function compactLoraNames(value) {
+        const values = Array.isArray(value) ? value : [value];
+        return values
+            .map(item => compactModelName(item).replace(/\.safetensors$/i, ""))
+            .filter(item => item && item !== "—")
+            .join("\n");
+    }
+
     function stageModelInfo(namespace, record) {
         if (record && /^unload/.test(String(record.activity || "")) && record.activityModel) {
             const name = compactModelName(record.activityModel);
@@ -5070,16 +5202,99 @@ class StatusProPlugin(WAN2GPPlugin):
         return parts.join(" - ") || runModel(run);
     }
 
-    function addRunField(container, label, value) {
+    function addRunField(container, label, value, displayValue = null, fullValue = null) {
         if (value === null || value === undefined || value === "" || (Array.isArray(value) && value.length === 0)) return;
         const wrapper = document.createElement("div");
         wrapper.className = "status-pro__run-field";
         const term = document.createElement("dt");
         term.textContent = label;
         const description = document.createElement("dd");
-        description.textContent = settingText(value);
+        description.textContent = displayValue === null ? settingText(value) : settingText(displayValue);
+        if (fullValue !== null && fullValue !== undefined && fullValue !== "") description.title = settingText(fullValue);
         wrapper.append(term, description);
         container.appendChild(wrapper);
+    }
+
+    function timingStageId(value, label = "") {
+        const source = `${String(value || "")} ${String(label || "")}`.toLowerCase();
+        if (/input|control|preprocess/.test(source)) return "input";
+        if (/prepare|setup|load|model/.test(source)) return "prepare";
+        if (/encode|prompt|text/.test(source)) return "encode";
+        if (/denois|generat|sampl/.test(source)) return "denoise";
+        if (/decode|vae/.test(source)) return "decode";
+        if (/enhance|upscal|post|interpol/.test(source)) return "enhance";
+        if (/save|mux|output/.test(source)) return "save";
+        return "unaccounted";
+    }
+
+    function timingOverviewSegments(run) {
+        const segments = Object.entries(run.stages || {})
+            .map(([key, stage]) => ({
+                stage: timingStageId(stage && stage.stage || String(key).split(":")[0], stage && stage.label),
+                label: String(stage && stage.label || "Stage"),
+                seconds: optionalNumber(stage && stage.duration_seconds)
+            }))
+            .filter(segment => Number.isFinite(segment.seconds) && segment.seconds > 0);
+        const observed = segments.reduce((sum, segment) => sum + segment.seconds, 0);
+        const wall = optionalNumber(run.duration_seconds);
+        const unaccounted = Number.isFinite(wall) ? Math.max(0, wall - observed) : 0;
+        if (unaccounted >= 0.5) segments.push({stage: "unaccounted", label: "Unaccounted", seconds: unaccounted});
+        return segments;
+    }
+
+    function appendTimingOverview(body, run) {
+        const segments = timingOverviewSegments(run);
+        const total = segments.reduce((sum, segment) => sum + segment.seconds, 0);
+        if (!(total > 0)) return [];
+
+        const overview = document.createElement("div");
+        overview.className = "status-pro__timing-overview";
+        const label = document.createElement("span");
+        label.className = "status-pro__timing-overview-label";
+        label.textContent = "Observed timing composition";
+        const bar = document.createElement("div");
+        bar.className = "status-pro__timing-bar";
+        bar.setAttribute("role", "img");
+        bar.setAttribute("aria-label", segments.map(segment => `${segment.label}: ${formatDuration(segment.seconds, true)}`).join("; "));
+        segments.forEach(segment => {
+            const item = document.createElement("span");
+            item.className = "status-pro__timing-segment";
+            item.dataset.stage = segment.stage;
+            item.style.width = `${(segment.seconds / total) * 100}%`;
+            item.title = `${segment.label}: ${formatDuration(segment.seconds, true)} (${Math.round(segment.seconds / total * 1000) / 10}%)`;
+            bar.appendChild(item);
+        });
+        overview.append(label, bar);
+        body.appendChild(overview);
+        return segments;
+    }
+
+    function stepTimingOutliers(steps) {
+        const groups = new Map();
+        steps.forEach((step, index) => {
+            const duration = optionalNumber(step && step.duration_seconds);
+            if (!Number.isFinite(duration) || duration < 0 || step.skipped === true) return;
+            const passNo = optionalNumber(step.pass_no);
+            const phaseNo = optionalNumber(step.phase);
+            const key = Number.isFinite(passNo) && passNo > 0
+                ? `pass:${passNo}`
+                : (Number.isFinite(phaseNo) && phaseNo > 0 ? `phase:${phaseNo}` : `label:${String(step.label || "generate")}`);
+            if (!groups.has(key)) groups.set(key, []);
+            groups.get(key).push({index, duration});
+        });
+        const fastest = new Set();
+        const slowest = new Set();
+        groups.forEach(records => {
+            if (records.length < 2) return;
+            const minimum = Math.min(...records.map(record => record.duration));
+            const maximum = Math.max(...records.map(record => record.duration));
+            if (minimum === maximum) return;
+            records.forEach(record => {
+                if (record.duration === minimum) fastest.add(record.index);
+                if (record.duration === maximum) slowest.add(record.index);
+            });
+        });
+        return {fastest, slowest};
     }
 
     function addImportedMediaField(container, run, records, pending = false) {
@@ -5168,7 +5383,8 @@ class StatusProPlugin(WAN2GPPlugin):
         });
         head.appendChild(header);
         const tableBody = document.createElement("tbody");
-        steps.forEach(step => {
+        const outliers = stepTimingOutliers(steps);
+        steps.forEach((step, stepIndex) => {
             const row = document.createElement("tr");
             const memory = step && step.memory || {};
             const skipped = step.skipped === true ? (optionalNumber(step.skipped_delta) > 1 ? `Yes (×${step.skipped_delta})` : "Yes") : (step.skipped === false ? "No" : "—");
@@ -5188,6 +5404,13 @@ class StatusProPlugin(WAN2GPPlugin):
                 const cell = document.createElement("td");
                 cell.textContent = value === null || value === undefined ? "—" : String(value);
                 if (index === 3 && step.skipped === true) cell.className = "status-pro__step-skipped";
+                if (index === 2 && outliers.fastest.has(stepIndex)) {
+                    cell.className = "status-pro__step-fastest";
+                    cell.title = "Fastest observed step in this pass";
+                } else if (index === 2 && outliers.slowest.has(stepIndex)) {
+                    cell.className = "status-pro__step-slowest";
+                    cell.title = "Slowest observed step in this pass";
+                }
                 row.appendChild(cell);
             });
             tableBody.appendChild(row);
@@ -5344,7 +5567,8 @@ class StatusProPlugin(WAN2GPPlugin):
             if (Number.isFinite(peakVramReserved)) addRunField(fields, "Observed peak VRAM reserved", formatBytes(peakVramReserved));
             if (Number.isFinite(peakGpuUsed)) addRunField(fields, "Observed peak GPU memory used", formatBytes(peakGpuUsed));
             addRunField(fields, "GPU", run.resources && run.resources.gpu_name);
-            addRunField(fields, "LoRAs", setting(settings, "activated_loras"));
+            const loras = setting(settings, "activated_loras");
+            addRunField(fields, "LoRAs", loras, compactLoraNames(loras), loras);
             addRunField(fields, "Output", outputLabel(run));
             if (imported) {
                 addImportedMediaField(
@@ -5386,6 +5610,7 @@ class StatusProPlugin(WAN2GPPlugin):
                 body.appendChild(outputActions);
             }
 
+            const timingSegments = appendTimingOverview(body, run);
             const stages = document.createElement("div");
             stages.className = "status-pro__stage-breakdown";
             Object.values(run.stages || {}).forEach(stage => {
@@ -5395,8 +5620,17 @@ class StatusProPlugin(WAN2GPPlugin):
                     ? "Preloaded"
                     : (stage.unreported ? "Not reported" : formatDuration(Number(stage.duration_seconds)));
                 chip.textContent = `${stage.label}: ${stageTime}`;
+                chip.dataset.stage = timingStageId(stage.stage, stage.label);
                 stages.appendChild(chip);
             });
+            const unaccountedTiming = timingSegments.find(segment => segment.stage === "unaccounted" && segment.label === "Unaccounted");
+            if (unaccountedTiming) {
+                const chip = document.createElement("span");
+                chip.dataset.stage = "unaccounted";
+                chip.textContent = `Unaccounted: ${formatDuration(unaccountedTiming.seconds)}`;
+                chip.title = "Wall-clock time not assigned to a reported Wan2GP stage.";
+                stages.appendChild(chip);
+            }
             if (stages.childElementCount) body.appendChild(stages);
             appendStepPerformance(body, run);
             details.append(summary, body);
@@ -5525,11 +5759,13 @@ class StatusProPlugin(WAN2GPPlugin):
         const empty = namespace.panel.querySelector("[data-sp-history-empty]");
         if (!container || !empty) return;
         const runs = historyRuns(namespace);
-        const key = `${namespace.historyScope}:${runs.map(run => run.id).join("|")}`;
+        const key = `${namespace.historyRecording === false ? "off:" : ""}${namespace.historyScope}:${runs.map(run => run.id).join("|")}`;
         if (namespace.historyRenderKey === key) return;
         namespace.historyRenderKey = key;
         empty.hidden = runs.length > 0;
-        empty.textContent = namespace.historyScope === "session"
+        empty.textContent = namespace.historyRecording === false && !runs.length
+            ? "Automatic history recording is off. Existing records are unchanged."
+            : namespace.historyScope === "session"
             ? "No generations recorded for this session yet."
             : "No generations recorded yet.";
         const fragment = document.createDocumentFragment();
@@ -5727,7 +5963,7 @@ class StatusProPlugin(WAN2GPPlugin):
             downloadText(`status-pro-${stamp}.json`, "application/json;charset=utf-8", JSON.stringify({
                 exported_at: exportedAt.toISOString(),
                 exported_at_local: localIsoTimestamp(exportedAt),
-                version: "1.0.0",
+                version: "1.0.1",
                 ...metadata,
                 runs: records
             }, null, 2));
@@ -5948,6 +6184,7 @@ class StatusProPlugin(WAN2GPPlugin):
 
     function modalSettings(namespace) {
         return namespace.settingsDraft || {
+            historyRecording: namespace.historyRecording !== false,
             historyPersistence: namespace.historyPersistence,
             promptMemory: namespace.promptMemory !== false,
             exportFields: namespace.exportFields,
@@ -6022,9 +6259,16 @@ class StatusProPlugin(WAN2GPPlugin):
         ensureExportFieldControls(namespace);
         const settings = modalSettings(namespace);
         const persistence = namespace.panel.querySelector("[data-sp-history-persistence]");
-        if (persistence) persistence.value = settings.historyPersistence;
+        if (persistence) persistence.value = settings.historyRecording ? settings.historyPersistence : "off";
         const promptMemory = namespace.panel.querySelector("[data-sp-prompt-memory]");
-        if (promptMemory) promptMemory.checked = settings.promptMemory;
+        if (promptMemory) {
+            promptMemory.checked = settings.promptMemory;
+            promptMemory.disabled = !settings.historyRecording;
+            const promptMemoryLabel = promptMemory.closest("label");
+            if (promptMemoryLabel) promptMemoryLabel.title = settings.historyRecording
+                ? "Keep prompt text only in this page so it can be explicitly included in exports"
+                : "Prompt memory is paused while automatic history recording is off";
+        }
         const format = namespace.panel.querySelector("[data-sp-export-format]");
         if (format) format.value = normalizeExportFormat(settings.exportFormat);
         const runs = exportSourceRuns(namespace);
@@ -6044,7 +6288,9 @@ class StatusProPlugin(WAN2GPPlugin):
         const promptNote = namespace.panel.querySelector("[data-sp-export-prompt-note]");
         if (promptNote) {
             promptNote.dataset.state = !settings.promptMemory ? "unavailable" : (promptRuns === runs.length && runs.length ? "available" : (promptRuns ? "partial" : "unavailable"));
-            promptNote.textContent = !settings.promptMemory
+            promptNote.textContent = !settings.historyRecording
+                ? "Automatic history recording is off. Prompt memory is paused; existing records remain available for review and export."
+                : !settings.promptMemory
                 ? "Prompt memory is off. Future prompts will not be retained for History exports; saving this change also removes prompt text currently held by Status Pro."
                 : !runs.length
                     ? "Prompt memory is on. Prompts from future runs will remain available only while this page stays open."
@@ -6119,6 +6365,7 @@ class StatusProPlugin(WAN2GPPlugin):
         const modal = namespace.panel.querySelector("[data-sp-export-modal]");
         if (!modal) return;
         namespace.settingsDraft = {
+            historyRecording: namespace.historyRecording !== false,
             historyPersistence: namespace.historyPersistence,
             promptMemory: namespace.promptMemory !== false,
             exportFields: new Set(namespace.exportFields),
@@ -6188,11 +6435,13 @@ class StatusProPlugin(WAN2GPPlugin):
         const selectedCount = selectedHistoryRuns(namespace).length;
         drawer.hidden = !namespace.historyOpen;
         toggle.setAttribute("aria-expanded", namespace.historyOpen ? "true" : "false");
-        toggle.title = `${namespace.historyOpen ? "Hide" : "Show"} generation history · ${allCount} task${allCount === 1 ? "" : "s"}, ${namespace.runHistory.length} recorded run${namespace.runHistory.length === 1 ? "" : "s"}`;
+        toggle.setAttribute("data-recording", namespace.historyRecording === false ? "off" : "on");
+        toggle.title = `${namespace.historyOpen ? "Hide" : "Show"} generation history · ${namespace.historyRecording === false ? "automatic recording off · " : ""}${allCount} task${allCount === 1 ? "" : "s"}, ${namespace.runHistory.length} recorded run${namespace.runHistory.length === 1 ? "" : "s"}`;
+        text(toggle, "[data-sp-history-label]", namespace.historyRecording === false ? "History off" : "History");
         text(toggle, "[data-sp-history-count]", allCount);
         const modalSummary = namespace.panel.querySelector("[data-sp-history-modal-summary]");
         if (modalSummary) {
-            modalSummary.textContent = `${allCount} task${allCount === 1 ? "" : "s"} · ${namespace.runHistory.length} recorded run${namespace.runHistory.length === 1 ? "" : "s"}`;
+            modalSummary.textContent = `${namespace.historyRecording === false ? "Automatic recording off · " : ""}${allCount} task${allCount === 1 ? "" : "s"} · ${namespace.runHistory.length} recorded run${namespace.runHistory.length === 1 ? "" : "s"}`;
         }
         namespace.panel.querySelectorAll("[data-sp-history-scope]").forEach(button => {
             const selected = button.dataset.spHistoryScope === namespace.historyScope;
@@ -6237,8 +6486,11 @@ class StatusProPlugin(WAN2GPPlugin):
         if (clear) clear.disabled = namespace.runHistory.length === 0;
         const storageNote = namespace.panel.querySelector("[data-sp-history-storage-note]");
         if (storageNote) {
-            storageNote.textContent = namespace.historyStorageNotice || "";
-            storageNote.hidden = !namespace.historyStorageNotice;
+            const recordingNote = namespace.historyRecording === false
+                ? "Automatic history recording is off. Existing records are unchanged."
+                : "";
+            storageNote.textContent = namespace.historyStorageNotice || recordingNote;
+            storageNote.hidden = !(namespace.historyStorageNotice || recordingNote);
         }
         if (namespace.historyOpen) renderHistory(namespace);
     }
@@ -6250,7 +6502,7 @@ class StatusProPlugin(WAN2GPPlugin):
         idle.hidden = false;
         running.hidden = true;
         const sessionRuns = namespace.runHistory.filter(run => namespace.sessionRunIds.has(run.id));
-        const completed = sessionRuns.length > 0;
+        const completed = namespace.historyRecording !== false && sessionRuns.length > 0;
         const generationCount = sessionRuns.reduce((sum, run) => sum + Math.max(1, Number(run.repeats) || 1), 0);
         const total = sessionRuns.reduce((sum, run) => sum + (Number(run.duration_seconds) || 0), 0);
         const latest = sessionRuns.reduce((value, run) => Math.max(value, Number(run.completed_at) || 0), 0);
@@ -6261,6 +6513,8 @@ class StatusProPlugin(WAN2GPPlugin):
         text(namespace.panel, "[data-sp-idle-title]", completed ? "All generations complete" : "Ready to generate");
         text(namespace.panel, "[data-sp-idle-message]", completed
             ? `${generationCount} generation${generationCount === 1 ? "" : "s"}${sessionRuns.length !== generationCount ? ` across ${sessionRuns.length} queued runs` : ""} completed in ${formatDuration(total)}.`
+            : namespace.historyRecording === false
+                ? "Live generation timing will appear here. Automatic history recording is off."
             : (namespace.runHistory.length
                 ? `${namespace.runHistory.length} saved generation${namespace.runHistory.length === 1 ? "" : "s"} available below.`
                 : "Generation timing and settings will appear here after the first run."));
@@ -6728,6 +6982,7 @@ class StatusProPlugin(WAN2GPPlugin):
         const customExportPresets = loadCustomExportPresets();
         const savedExportSettings = loadExportSettings();
         const promptMemory = loadPromptMemoryPreference();
+        const historyRecording = loadHistoryRecordingPreference();
         const initialRunBridge = parseRunBridge(container);
         const runtimeId = runtimeIdFromTelemetry(initialRunBridge.telemetry);
         const historyPersistence = loadHistoryPersistence(runtimeId);
@@ -6751,6 +7006,7 @@ class StatusProPlugin(WAN2GPPlugin):
             activeRun: null,
             runHistory,
             historyPersistence,
+            historyRecording,
             promptMemory,
             runtimeId,
             historyStorageNotice: "",
@@ -6958,10 +7214,11 @@ class StatusProPlugin(WAN2GPPlugin):
 
         const historyPersistenceSelect = panel.querySelector("[data-sp-history-persistence]");
         if (historyPersistenceSelect) {
-            historyPersistenceSelect.value = namespace.historyPersistence;
+            historyPersistenceSelect.value = namespace.historyRecording === false ? "off" : namespace.historyPersistence;
             historyPersistenceSelect.addEventListener("change", () => {
                 const settings = modalSettings(namespace);
-                settings.historyPersistence = normalizeHistoryPersistence(historyPersistenceSelect.value);
+                settings.historyRecording = historyPersistenceSelect.value !== "off";
+                if (settings.historyRecording) settings.historyPersistence = normalizeHistoryPersistence(historyPersistenceSelect.value);
                 renderExportModal(namespace);
             });
         }
@@ -7147,7 +7404,9 @@ class StatusProPlugin(WAN2GPPlugin):
                 const settings = modalSettings(namespace);
                 const fields = selectedExportFieldsFromModal(namespace);
                 if (!fields.size) return;
+                const nextRecording = settings.historyRecording !== false;
                 const nextHistory = normalizeHistoryPersistence(settings.historyPersistence);
+                if (nextRecording !== (namespace.historyRecording !== false) && !window.confirm(historyRecordingConfirmation(nextRecording))) return;
                 if (nextHistory !== namespace.historyPersistence && !window.confirm(historyPersistenceConfirmation(nextHistory))) return;
                 if (!settings.promptMemory && namespace.promptMemory !== false &&
                     !window.confirm("Turn off page-session prompt memory?\n\nPrompt text currently held by Status Pro will be removed, and future prompts will not be available in History exports until this setting is turned on again.")) return;
@@ -7155,6 +7414,7 @@ class StatusProPlugin(WAN2GPPlugin):
                     window.alert(namespace.historyStorageNotice || "Status Pro could not change the history storage setting.");
                     return;
                 }
+                setHistoryRecording(namespace, nextRecording);
                 setPromptMemory(namespace, settings.promptMemory);
                 namespace.exportFields = new Set(fields);
                 namespace.exportPreset = inferExportPreset(namespace, fields);

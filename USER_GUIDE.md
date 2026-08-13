@@ -99,6 +99,12 @@ Open **History** from the top-right of Status Pro. History remains available whi
 
 Each row summarizes the task, model family and variant, media type, resolution, outcome, duration, and completion time. Expand a row for stage timings, settings, step performance, memory observations, outputs, and failure details.
 
+Expanded records use highlighted, top-aligned field labels to keep long values easier to scan. LoRAs are shown one per line using only the filename without `.safetensors`; hover the value for the complete captured source. Exports continue to contain the original LoRA values.
+
+The **Observed timing composition** bar summarizes the measured stage durations across the run. Its colours identify Prepare, Inputs, Encode, Generate, Decode, Enhance, and Save. A diagonally striped **Unaccounted** segment represents wall-clock time that was not covered by an observed stage; it is not an error indicator or a second progress bar.
+
+In **Step observations**, the fastest valid Time value in each pass is highlighted in green and the slowest in red. Skipped observations are excluded, and the highlights indicate relative timing only—a slowest step is not necessarily faulty.
+
 Status Pro retains up to 100 run records. If browser storage cannot retain the full visible ledger, Status Pro reconciles the list with what was actually saved and displays a storage warning.
 
 ### History toolbar
@@ -155,11 +161,14 @@ Open **⚙ History settings** in the History toolbar to choose how long history 
 
 | Setting | Behaviour |
 | --- | --- |
+| **Do not record new runs** | Keeps the live stage-based Status Pro display active but does not add newly completed, aborted, or failed runs to History. Existing records remain available until cleared under their current retention setting. |
 | **Until manually cleared** | Keeps prompt-free history in this browser across WanGP and browser restarts. It remains until you use **Clear selected** or **Clear history**. |
 | **Until browser tab closes** | History survives ordinary reloads and WanGP restarts while the same browser tab or app webview remains open. Closing that browsing context normally clears it. |
 | **Until WanGP restarts** | The default. History can survive closing and reopening the browser while the same WanGP process remains active, but clears when Status Pro detects a new WanGP launch. |
 
 The **Prompts** section includes **Remember prompts in this page until it closes**. It is enabled by default so prompts from the current browser session can be explicitly included in an export. Turn it off if you do not want Status Pro to hold prompt text; saving that change removes prompts already held by Status Pro. The preference itself can persist, but prompt text is still excluded from longer-lived history and unchecked in exports by default.
+
+When **Do not record new runs** is selected, prompt memory is paused and the top button reads **History off**. You can still open, export, import, or clear records already in the ledger. Turning recording back on uses the retention lifetime you select; runs that finished while recording was off are not recreated.
 
 Choose a different history lifetime and select **Save settings** to see a confirmation explaining exactly what will survive and what event will clear it. **Cancel** or the × discards unsaved changes. The settings window is draggable and remains constrained to the visible browser area.
 

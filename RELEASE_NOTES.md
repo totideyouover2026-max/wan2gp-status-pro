@@ -1,41 +1,31 @@
-# Status Pro v1.0.0
+# Status Pro v1.0.1
 
-Status Pro gives WanGP a responsive generation timeline, trustworthy live timing, and a privacy-controlled local history ledger. It observes WanGP's existing generation process and does not change model output or generation behaviour.
+Status Pro 1.0.1 is a focused usability update for users who want the live stage-based dashboard without a generation ledger, and for faster review of detailed History records. It observes WanGP's existing generation process and does not change model output or generation behaviour.
 
-## Highlights
+## What's new
 
-- Selectable Prepare, Inputs, Encode, Generate, Decode, Enhance, and Save stages, with optional stages shown only when used.
-- Live elapsed time, stabilized denoising and enhancement ETA, and smoothed time per step where WanGP exposes measurable progress.
-- Model loading, preloaded-model, model-unloading, and model-download detail inside the same Status Pro interface.
-- Concise transformer, text-encoder, input-VAE, and output-VAE filenames without full local paths or download URLs in the UI.
-- Responsive stage cards, a compact collapsed header, and a narrow-screen layout that keeps the selected stage readable.
-- Queue-aware History with completed, sliding-window, incomplete, aborted, and failed outcomes.
-- Collapsed task groups for multi-window and repeated runs, with chronological child records and tri-state selection.
-- Per-stage timings, per-step performance, cache-skip observations, and sampled RAM/VRAM summaries.
-- Direct navigation to matching WanGP gallery items without scrolling or autoplay.
-- A large synchronized History workspace for reviewing busy generation ledgers.
-
-## Export and import
-
-- JSON, CSV, and Markdown exports.
-- Standard, Performance, Reproducibility, and Share-safe presets, plus multiple named custom presets.
-- Field-by-field export controls with concise hover help.
-- JSON history import into an empty ledger, preserving available provenance and recorded metadata.
-- Imported outputs that still exist inside WanGP's configured output folders can be restored to the native video/image or audio gallery.
+- **Do not record new runs** can be selected from History settings. Live stages, elapsed time, ETA, downloads, and current performance continue normally, but newly completed, aborted, and failed runs are not added to History.
+- Existing records remain available for review, export, import, gallery actions, or clearing while automatic recording is off.
+- The top control reads **History off**, and prompt memory is paused until automatic recording is enabled again.
+- Expanded History uses clearer, top-aligned field labels and a less crowded responsive grid.
+- A measured **Observed timing composition** bar gives a quick stage-duration overview. Wall-clock time not covered by observed stages uses a theme-aware diagonal pattern instead of a fixed grey or theme accent.
+- Step observations highlight the fastest and slowest valid Time value within each pass. Skipped steps are excluded.
+- Visible LoRA names are reduced to filename-only labels without `.safetensors`, one per line; complete captured values remain available in tooltips and structured exports.
 
 ## Privacy and retention
 
-History is stored in the browser and is never sent to an external service by Status Pro. Users can choose to retain it:
+History is stored in the browser and is never sent to an external service by Status Pro. Users can disable new recording or retain recorded runs:
 
+- without recording new runs;
 - until manually cleared;
 - until the browser tab or app webview closes; or
 - until WanGP restarts (the default).
 
-Prompt memory is optional and page-session scoped. Prompt fields are unchecked in exports by default, and prompts are not placed in the longer-lived WanGP-runtime or manually-cleared stores. Share-safe exports exclude prompts, local output paths, exact checkpoints, complete settings objects, and browser/session identifiers.
+Prompt memory is optional and page-session scoped. It is paused while automatic History recording is off. Prompt fields remain unchecked in exports by default, and prompts are not placed in the longer-lived WanGP-runtime or manually-cleared stores.
 
 ## Compatibility
 
-- Built and Tested on WanGP 12.452 or later. Older versions may still be compatible but it can not be guaranteed.
+- Tested with WanGP 12.452 and later. No hard minimum is declared because earlier versions may also be compatible, although they are not guaranteed.
 - No additional required Python dependencies.
 - Process-memory telemetry uses `psutil` when it is already available through WanGP and otherwise degrades gracefully.
 - Detailed model-download telemetry is plugin-local and fails open: generation continues normally if WanGP or Hugging Face changes an observed internal interface.
@@ -45,7 +35,7 @@ Prompt memory is optional and page-session scoped. Prompt fields are unchecked i
 - Decode commonly runs as one blocking VAE operation. When WanGP provides no intermediate units, Status Pro shows elapsed activity without inventing a percentage or ETA.
 - ETA is shown only for work with measurable incremental progress and may adjust during early steps or changing GPU load.
 - RAM and VRAM figures are periodic observations rather than profiler traces; device-used VRAM can include other applications.
-- Status Pro retains at most 100 history records and the latest 300 callback step observations per observed generation phase session.
+- Status Pro retains at most 100 history records and the latest 300 callback step observations per observed generation phase session when automatic recording is enabled.
 - Browser polling can differ slightly from WanGP's internal terminal timings.
 - Detailed download reporting depends on plugin-observed WanGP and Hugging Face activity; its absence does not affect downloading or generation.
 - Import Media from an imported History JSON will add in the same manner as adding media without extended JSON details.  

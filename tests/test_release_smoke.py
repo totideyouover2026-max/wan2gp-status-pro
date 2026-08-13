@@ -75,11 +75,11 @@ class ReleaseSmokeTests(unittest.TestCase):
             self.assertTrue((ROOT / document).is_file(), document)
         manifest = json.loads((ROOT / "plugin_info.json").read_text(encoding="utf-8"))
         version = manifest["version"]
-        self.assertEqual(version, "1.0.0")
+        self.assertEqual(version, "1.0.1")
         self.assertIn(f'self.version = "{version}"', source)
         self.assertIn(f'version: "{version}"', source)
         self.assertEqual(manifest["type"], "extension")
-        self.assertEqual(manifest["wan2gp_version"], "12.452")
+        self.assertEqual(manifest["wan2gp_version"], "")
 
     def test_embedded_markup_has_release_controls(self):
         markup = _returned_string("_markup")
@@ -102,6 +102,7 @@ class ReleaseSmokeTests(unittest.TestCase):
             "data-sp-detail-activities",
         ):
             self.assertIn(token, markup)
+        self.assertIn('option value="off">Do not record new runs', markup)
         self.assertNotIn("data-sp-capture-prompts", markup)
         toolbar_order = (
             "data-sp-import-button",
@@ -588,6 +589,83 @@ if (savedExport.format !== "md" || savedExport.fields.length !== 2 || !savedExpo
             check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_history_recording_and_v101_history_display_helpers(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is required for V1.0.1 history behavior validation")
+        javascript = _javascript_with_exports(
+            "loadHistoryRecordingPreference",
+            "setHistoryRecording",
+            "historyRecordingConfirmation",
+            "compactLoraNames",
+            "timingOverviewSegments",
+            "stepTimingOutliers",
+        )
+        test_script = r'''
+const values = {};
+globalThis.window = {
+  localStorage: {
+    getItem(key) { return Object.prototype.hasOwnProperty.call(values, key) ? values[key] : null; },
+    setItem(key, value) { values[key] = String(value); }
+  }
+};
+const api = globalThis.__statusProReleaseTest;
+if (!api.loadHistoryRecordingPreference()) throw new Error("history recording did not default on");
+const namespace = {historyRecording: true, historyStorageNotice: "", historyRenderKey: "cached"};
+api.setHistoryRecording(namespace, false);
+if (namespace.historyRecording || values["wangp.status-pro.history-recording.v1"] !== "0") throw new Error("history off was not saved");
+if (!namespace.historyStorageNotice.includes("Existing records are unchanged")) throw new Error("history off notice is unclear");
+if (!api.historyRecordingConfirmation(false).includes("Live Status Pro tracking will continue")) throw new Error("history off confirmation omits live tracking");
+api.setHistoryRecording(namespace, true);
+if (!namespace.historyRecording || values["wangp.status-pro.history-recording.v1"] !== "1") throw new Error("history on was not restored");
+
+const loras = api.compactLoraNames([
+  "https://huggingface.co/example/resolve/main/loras/first_style.safetensors?download=true",
+  "C:\\models\\second_style.safetensors"
+]);
+if (loras !== "first_style\nsecond_style") throw new Error(`LoRA display was not compacted line by line: ${loras}`);
+
+const segments = api.timingOverviewSegments({
+  duration_seconds: 100,
+  stages: {
+    setup: {label: "Loading model", duration_seconds: 10},
+    denoise: {stage: "denoise", label: "Generate", duration_seconds: 70}
+  }
+});
+if (segments.length !== 3 || segments[2].stage !== "unaccounted" || segments[2].seconds !== 20) {
+  throw new Error("timing overview did not preserve unaccounted wall time");
+}
+if (segments[0].stage !== "prepare") throw new Error("legacy stage labels were not mapped to timing colours");
+
+const observations = [
+  {pass_no: 1, duration_seconds: 3},
+  {pass_no: 1, duration_seconds: 1},
+  {pass_no: 1, duration_seconds: 5},
+  {pass_no: 1, duration_seconds: 0.1, skipped: true},
+  {pass_no: 2, duration_seconds: 10},
+  {pass_no: 2, duration_seconds: 20}
+];
+const outliers = api.stepTimingOutliers(observations);
+if (!outliers.fastest.has(1) || !outliers.slowest.has(2) || !outliers.fastest.has(4) || !outliers.slowest.has(5)) {
+  throw new Error("per-pass fastest and slowest observations were not identified");
+}
+if (outliers.fastest.has(3)) throw new Error("skipped observations were included in timing outliers");
+'''
+        result = subprocess.run(
+            [node, "-"],
+            input=javascript + "\n" + test_script,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        javascript_source = _returned_string("_javascript")
+        self.assertIn('if (namespace.historyRecording === false)', javascript_source)
+        self.assertIn('repeating-linear-gradient', javascript_source)
+        self.assertIn('chip.dataset.stage = timingStageId', javascript_source)
 
     def test_stage_media_outcome_and_export_regressions(self):
         node = shutil.which("node")
