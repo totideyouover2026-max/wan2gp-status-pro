@@ -79,7 +79,9 @@ class ReleaseSmokeTests(unittest.TestCase):
         self.assertIn(f'self.version = "{version}"', source)
         self.assertIn(f'version: "{version}"', source)
         self.assertEqual(manifest["type"], "extension")
-        self.assertEqual(manifest["wan2gp_version"], "")
+        # WanGP backfills blank metadata from its cached catalogue. A populated
+        # zero baseline behaves as no hard minimum without reviving stale values.
+        self.assertEqual(manifest["wan2gp_version"], "0")
 
     def test_embedded_markup_has_release_controls(self):
         markup = _returned_string("_markup")
