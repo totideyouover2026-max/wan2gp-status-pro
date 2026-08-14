@@ -6520,7 +6520,7 @@ class StatusProPlugin(WAN2GPPlugin):
         const {generationCount, totalDuration, latestFinishedAt, latestDuration} = sessionCompletionSummary(sessionRuns);
         text(namespace.panel, "[data-sp-live]", completed ? "Complete" : "Ready");
         text(namespace.panel, "[data-sp-steps]", "");
-        text(namespace.panel, "[data-sp-overall]", completed ? `${formatDuration(latestDuration)} last run` : "");
+        text(namespace.panel, "[data-sp-overall]", completed ? `${formatDuration(latestDuration)}` : "");
         text(namespace.panel, "[data-sp-eta]", "");
         text(namespace.panel, "[data-sp-idle-title]", completed ? "All generations complete" : "Ready to generate");
         text(namespace.panel, "[data-sp-idle-message]", completed
