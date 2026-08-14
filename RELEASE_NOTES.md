@@ -1,6 +1,6 @@
-# Status Pro v1.0.1
+# Status Pro v1.0.2
 
-Status Pro 1.0.1 is a focused usability update for users who want the live stage-based dashboard without a generation ledger, and for faster review of detailed History records. It observes WanGP's existing generation process and does not change model output or generation behaviour.
+Status Pro 1.0.2 is a focused usability update for users who want the live stage-based dashboard without a generation ledger, and for faster review of detailed History records. It observes WanGP's existing generation process and does not change model output or generation behaviour.
 
 ## What's new
 

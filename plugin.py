@@ -595,7 +595,7 @@ class StatusProPlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = "Status Pro"
-        self.version = "1.0.1"
+        self.version = "1.0.2"
         self.description = (
             "Selectable pipeline timeline with stage timings and live ETA estimates."
         )
