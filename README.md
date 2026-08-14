@@ -71,7 +71,7 @@ For a practical explanation of every stage, History, storage modes, exports, and
 
 - Highlights and expands the currently running phase.
 - Remains visible before generation, while running, and after a queue completes.
-- Summarizes completed generations, total session time, and completion clock time.
+- Keeps the completed top bar focused on the latest generation task's full duration—including all sliding windows—while the expanded summary shows the session count, cumulative time, and latest completion clock time.
 - Records up to 100 completed queue runs with model/settings metadata, outputs, per-stage durations, and completion status.
 - Keeps the visible ledger consistent with browser storage limits and warns when older entries must be removed or persistence is unavailable.
 - Records each completed sliding-window segment as `Window N` and resets the live phase timeline for the next window.

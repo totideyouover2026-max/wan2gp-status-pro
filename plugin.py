@@ -6495,6 +6495,20 @@ class StatusProPlugin(WAN2GPPlugin):
         if (namespace.historyOpen) renderHistory(namespace);
     }
 
+    function sessionCompletionSummary(sessionRuns) {
+        const runs = Array.isArray(sessionRuns) ? sessionRuns : [];
+        const latestTask = groupHistoryRuns(runs).map(historyTaskSummary).reduce((latestTask, task) => {
+            if (!latestTask) return task;
+            return (Number(task && task.completedAt) || 0) >= (Number(latestTask.completedAt) || 0) ? task : latestTask;
+        }, null);
+        return {
+            generationCount: runs.reduce((sum, run) => sum + Math.max(1, Number(run && run.repeats) || 1), 0),
+            totalDuration: runs.reduce((sum, run) => sum + (Number(run && run.duration_seconds) || 0), 0),
+            latestFinishedAt: Number(latestTask && latestTask.completedAt) || 0,
+            latestDuration: Number(latestTask && latestTask.duration) || 0
+        };
+    }
+
     function renderIdle(namespace) {
         const idle = namespace.panel.querySelector("[data-sp-idle]");
         const running = namespace.panel.querySelector("[data-sp-running]");
@@ -6503,16 +6517,14 @@ class StatusProPlugin(WAN2GPPlugin):
         running.hidden = true;
         const sessionRuns = namespace.runHistory.filter(run => namespace.sessionRunIds.has(run.id));
         const completed = namespace.historyRecording !== false && sessionRuns.length > 0;
-        const generationCount = sessionRuns.reduce((sum, run) => sum + Math.max(1, Number(run.repeats) || 1), 0);
-        const total = sessionRuns.reduce((sum, run) => sum + (Number(run.duration_seconds) || 0), 0);
-        const latest = sessionRuns.reduce((value, run) => Math.max(value, Number(run.completed_at) || 0), 0);
+        const {generationCount, totalDuration, latestFinishedAt, latestDuration} = sessionCompletionSummary(sessionRuns);
         text(namespace.panel, "[data-sp-live]", completed ? "Complete" : "Ready");
-        text(namespace.panel, "[data-sp-steps]", completed ? `${generationCount} generation${generationCount === 1 ? "" : "s"}` : "No runs this session");
-        text(namespace.panel, "[data-sp-overall]", completed ? `${formatDuration(total)} total` : "");
-        text(namespace.panel, "[data-sp-eta]", completed ? `Finished ${formatClock(latest)}` : "");
+        text(namespace.panel, "[data-sp-steps]", "");
+        text(namespace.panel, "[data-sp-overall]", completed ? `${formatDuration(latestDuration)} last run` : "");
+        text(namespace.panel, "[data-sp-eta]", "");
         text(namespace.panel, "[data-sp-idle-title]", completed ? "All generations complete" : "Ready to generate");
         text(namespace.panel, "[data-sp-idle-message]", completed
-            ? `${generationCount} generation${generationCount === 1 ? "" : "s"}${sessionRuns.length !== generationCount ? ` across ${sessionRuns.length} queued runs` : ""} completed in ${formatDuration(total)}.`
+            ? `${generationCount} generation${generationCount === 1 ? "" : "s"}${sessionRuns.length !== generationCount ? ` across ${sessionRuns.length} queued runs` : ""} completed in ${formatDuration(totalDuration)}. Most recent generation finished at ${formatClock(latestFinishedAt)}.`
             : namespace.historyRecording === false
                 ? "Live generation timing will appear here. Automatic history recording is off."
             : (namespace.runHistory.length

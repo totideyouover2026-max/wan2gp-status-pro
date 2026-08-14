@@ -603,6 +603,7 @@ if (savedExport.format !== "md" || savedExport.fields.length !== 2 || !savedExpo
             "compactLoraNames",
             "timingOverviewSegments",
             "stepTimingOutliers",
+            "sessionCompletionSummary",
         )
         test_script = r'''
 const values = {};
@@ -653,6 +654,14 @@ if (!outliers.fastest.has(1) || !outliers.slowest.has(2) || !outliers.fastest.ha
   throw new Error("per-pass fastest and slowest observations were not identified");
 }
 if (outliers.fastest.has(3)) throw new Error("skipped observations were included in timing outliers");
+
+const completion = api.sessionCompletionSummary([
+  {id: "older", session_id: "s", queue_task_id: 1, started_at: 1000, completed_at: 31000, duration_seconds: 30, repeats: 1},
+  {id: "window-1", session_id: "s", queue_task_id: 2, started_at: 40000, completed_at: 45000, duration_seconds: 5, repeats: 1, window_no: 1, total_windows: 2, status: "window"},
+  {id: "window-2", session_id: "s", queue_task_id: 2, started_at: 45000, completed_at: 52000, duration_seconds: 7, repeats: 1, window_no: 2, total_windows: 2, status: "completed"}
+]);
+if (completion.generationCount !== 3 || completion.totalDuration !== 42) throw new Error("session completion totals are incorrect");
+if (completion.latestFinishedAt !== 52000 || completion.latestDuration !== 12) throw new Error("latest task did not aggregate all sliding windows");
 '''
         result = subprocess.run(
             [node, "-"],
@@ -668,6 +677,7 @@ if (outliers.fastest.has(3)) throw new Error("skipped observations were included
         self.assertIn('if (namespace.historyRecording === false)', javascript_source)
         self.assertIn('repeating-linear-gradient', javascript_source)
         self.assertIn('chip.dataset.stage = timingStageId', javascript_source)
+        self.assertIn('`${formatDuration(latestDuration)} last run`', javascript_source)
 
     def test_stage_media_outcome_and_export_regressions(self):
         node = shutil.which("node")

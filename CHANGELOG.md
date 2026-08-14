@@ -15,6 +15,7 @@ All notable Status Pro changes will be recorded here. Versions follow Semantic V
 - Removed the hard WanGP version requirement from plugin metadata. A neutral compatibility baseline prevents WanGP from restoring an older cached requirement; WanGP 12.452 remains the tested baseline while earlier releases may still work.
 - Expanded-record labels are clearer and aligned to the top for faster scanning across responsive layouts.
 - Visible LoRA values use filename-only names without `.safetensors`, one per line, while complete captured values remain available in tooltips and exports.
+- The completed top bar now reports only the latest generation duration. Session counts, cumulative duration, and the latest finished-at time remain in the expanded summary.
 - Added regression coverage for History recording preferences, timing composition, per-pass step outliers, and LoRA display formatting.
 
 ## [1.0.0] - 2026-08-12

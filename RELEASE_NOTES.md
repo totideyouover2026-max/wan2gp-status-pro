@@ -11,6 +11,7 @@ Status Pro 1.0.1 is a focused usability update for users who want the live stage
 - A measured **Observed timing composition** bar gives a quick stage-duration overview. Wall-clock time not covered by observed stages uses a theme-aware diagonal pattern instead of a fixed grey or theme accent.
 - Step observations highlight the fastest and slowest valid Time value within each pass. Skipped steps are excluded.
 - Visible LoRA names are reduced to filename-only labels without `.safetensors`, one per line; complete captured values remain available in tooltips and structured exports.
+- The completed top bar now shows only the latest generation's duration; session-wide counts, cumulative time, and the latest completion clock move to the expanded summary.
 
 ## Privacy and retention
 

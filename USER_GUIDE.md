@@ -30,7 +30,7 @@ At narrower window widths, the current stage remains expanded while inactive sta
 Status Pro remains useful when nothing is currently running:
 
 - **Before the first run**, it displays **Ready to generate** and explains that timing and settings will appear after generation.
-- **After a queue completes**, the top bar shows the number of generations completed in the current session, their combined recorded time, and the latest completion time.
+- **After a queue completes**, the top bar shows the most recent generation task's full duration, including all of its sliding windows. The expanded summary shows the current session's generation count, combined recorded time, and the clock time when the latest generation finished.
 - **When retained history comes from an earlier session**, the ready view points you to the saved records in History without treating them as new runs.
 
 The History drawer can remain open before, during, and after generation.
