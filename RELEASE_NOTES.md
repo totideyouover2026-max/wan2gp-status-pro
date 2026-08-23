@@ -1,9 +1,11 @@
-# Status Pro v1.0.2
+# Status Pro v1.0.3
 
-Status Pro 1.0.2 is a focused usability update for users who want the live stage-based dashboard without a generation ledger, and for faster review of detailed History records. It observes WanGP's existing generation process and does not change model output or generation behaviour.
+Status Pro 1.0.3 expands generation-history reproducibility and improves the History settings workspace. It observes WanGP's existing generation process and does not change model output or generation behaviour.
 
 ## What's new
 
+- History records the effective attention mode used by each generation, including global, model-specific, and per-run choices. Sol Attention also records its tau level.
+- The History settings modal is larger and arranges checkbox panels in independent columns, fitting more fields without the empty space caused by shared grid rows.
 - **Do not record new runs** can be selected from History settings. Live stages, elapsed time, ETA, downloads, and current performance continue normally, but newly completed, aborted, and failed runs are not added to History.
 - Existing records remain available for review, export, import, gallery actions, or clearing while automatic recording is off.
 - The top control reads **History off**, and prompt memory is paused until automatic recording is enabled again.

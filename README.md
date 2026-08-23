@@ -4,7 +4,7 @@ Status Pro replaces Wan2GP's main status presentation with a responsive pipeline
 
 ![Status Pro V1 overview showing live pipeline tracking, timing metrics, and browser-local history](SlideDeck/1.png)
 
-Status Pro 1.0.1 has been tested with **WanGP 12.452 and later**, but does not declare a hard minimum because its observers degrade gracefully and may also work with earlier releases. It has no additional required Python dependencies; process-memory telemetry uses `psutil` when WanGP already provides it and degrades gracefully when unavailable.
+Status Pro 1.0.3 has been tested with **WanGP 12.452 and later**, but does not declare a hard minimum because its observers degrade gracefully and may also work with earlier releases. It has no additional required Python dependencies; process-memory telemetry uses `psutil` when WanGP already provides it and degrades gracefully when unavailable.
 
 [User guide](USER_GUIDE.md) · [Installation](#install-and-enable) · [Release notes](RELEASE_NOTES.md)
 
@@ -88,6 +88,7 @@ For a practical explanation of every stage, History, storage modes, exports, and
 - Exports retained history as full JSON, analysis-friendly CSV, or readable Markdown.
 - Restores Status Pro JSON exports into an empty history for later review; imported rows retain available metadata and can add still-existing recorded outputs back to the native Wan2GP gallery.
 - Provides a draggable, viewport-contained History settings window for retention, prompt memory, export format, field selection, Standard/Performance/Reproducibility/Share-safe presets, and multiple named browser-saved custom presets.
+- Uses a larger History settings workspace with independently flowing field columns, keeping the checkbox panels compact while remaining bounded on smaller screens.
 - Explains the intended use of each preset in an in-modal guide and calls out that prompt fields are unchecked by default for privacy.
 - Applies the selected fields consistently across JSON, CSV, and Markdown, with Standard defaulting to every available field except prompts.
 - Lets you select individual history rows, or all rows in the active scope, for targeted exports.

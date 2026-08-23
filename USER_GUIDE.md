@@ -172,7 +172,7 @@ The **Prompts** section includes **Remember prompts in this page until it closes
 
 When **Do not record new runs** is selected, prompt memory is paused and the top button reads **History off**. You can still open, export, import, or clear records already in the ledger. Turning recording back on uses the retention lifetime you select; runs that finished while recording was off are not recreated.
 
-Choose a different history lifetime and select **Save settings** to see a confirmation explaining exactly what will survive and what event will clear it. **Cancel** or the × discards unsaved changes. The settings window is draggable and remains constrained to the visible browser area.
+Choose a different history lifetime and select **Save settings** to see a confirmation explaining exactly what will survive and what event will clear it. **Cancel** or the × discards unsaved changes. The larger settings workspace is draggable, remains constrained to the visible browser area, and stacks its independent field columns on narrow layouts.
 
 History and preferences stay in the browser; Status Pro does not send them to an external service. Use **Clear selected** or **Clear history** whenever you want to remove entries manually.
 

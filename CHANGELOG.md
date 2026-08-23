@@ -2,11 +2,12 @@
 
 All notable Status Pro changes will be recorded here. Versions follow Semantic Versioning.
 
-## Unreleased
+## [1.0.3] - 2026-08-23
 
 ### Added
 
 - History now records the effective WanGP attention mode, including global, model-specific, and per-generation choices. Sol Attention runs also retain their tau (`attention_sparsity`) level, and both values are available in History details and exports.
+- The History settings modal now uses a larger viewport-bounded workspace and independent checkbox-panel columns, reducing empty grid space and keeping more settings visible above the footer.
 
 ## [1.0.1] - 2026-08-13
 

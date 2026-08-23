@@ -75,7 +75,7 @@ class ReleaseSmokeTests(unittest.TestCase):
             self.assertTrue((ROOT / document).is_file(), document)
         manifest = json.loads((ROOT / "plugin_info.json").read_text(encoding="utf-8"))
         version = manifest["version"]
-        self.assertEqual(version, "1.0.1")
+        self.assertEqual(version, "1.0.3")
         self.assertIn(f'self.version = "{version}"', source)
         self.assertIn(f'version: "{version}"', source)
         self.assertEqual(manifest["type"], "extension")
@@ -130,6 +130,10 @@ class ReleaseSmokeTests(unittest.TestCase):
         self.assertIn("function importStatusProExport(namespace", javascript)
         self.assertIn("function requestGalleryImport(namespace", javascript)
         self.assertIn("addImportedMediaField(", javascript)
+        self.assertIn("width: min(1120px, calc(100vw - 16px))", javascript)
+        self.assertIn("height: min(900px, calc(100dvh - 16px))", javascript)
+        self.assertIn("status-pro__export-field-column", javascript)
+        self.assertIn("columns.length - 1 - ((index - columnCount) % columns.length)", javascript)
         self.assertIn('button.textContent = records.length === 1 ? "Import media"', javascript)
         self.assertNotIn("Gallery View is disabled for imported history", javascript)
         self.assertIn('(Array.isArray(value) && value.length === 0)', javascript)
@@ -683,10 +687,10 @@ if (savedExport.format !== "md" || savedExport.fields.length !== 2 || !savedExpo
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_history_recording_and_v101_history_display_helpers(self):
+    def test_history_recording_and_v103_history_display_helpers(self):
         node = shutil.which("node")
         if not node:
-            self.skipTest("Node is required for V1.0.1 history behavior validation")
+            self.skipTest("Node is required for V1.0.3 history behavior validation")
         javascript = _javascript_with_exports(
             "loadHistoryRecordingPreference",
             "setHistoryRecording",
@@ -768,7 +772,7 @@ if (completion.latestFinishedAt !== 52000 || completion.latestDuration !== 12) t
         self.assertIn('if (namespace.historyRecording === false)', javascript_source)
         self.assertIn('repeating-linear-gradient', javascript_source)
         self.assertIn('chip.dataset.stage = timingStageId', javascript_source)
-        self.assertIn('`${formatDuration(latestDuration)} last run`', javascript_source)
+        self.assertIn('completed ? `${formatDuration(latestDuration)}` : ""', javascript_source)
 
     def test_stage_media_outcome_and_export_regressions(self):
         node = shutil.which("node")

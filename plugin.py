@@ -624,7 +624,7 @@ class StatusProPlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = "Status Pro"
-        self.version = "1.0.2"
+        self.version = "1.0.3"
         self.description = (
             "Selectable pipeline timeline with stage timings and live ETA estimates."
         )
@@ -1883,10 +1883,10 @@ class StatusProPlugin(WAN2GPPlugin):
 .status-pro__export-modal {
     position: fixed;
     box-sizing: border-box;
-    width: min(880px, calc(100vw - 28px));
-    height: min(820px, calc(100dvh - 32px));
+    width: min(1120px, calc(100vw - 16px));
+    height: min(900px, calc(100dvh - 16px));
     max-width: none;
-    max-height: calc(100dvh - 32px);
+    max-height: calc(100dvh - 16px);
     padding: 0;
     overflow: hidden;
     border: 1px solid var(--sp-border);
@@ -2037,8 +2037,7 @@ class StatusProPlugin(WAN2GPPlugin):
     gap: 6px;
 }
 .status-pro__export-fields {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    display: flex;
     align-items: start;
     gap: 10px;
     min-height: 0;
@@ -2046,6 +2045,13 @@ class StatusProPlugin(WAN2GPPlugin):
     overflow-y: auto;
     scroll-padding-block: 12px 28px;
     scrollbar-width: thin;
+}
+.status-pro__export-field-column {
+    display: grid;
+    flex: 1 1 0;
+    gap: 10px;
+    align-content: start;
+    min-width: 0;
 }
 .status-pro__export-group {
     align-content: start;
@@ -2892,6 +2898,8 @@ class StatusProPlugin(WAN2GPPlugin):
     .status-pro__summary { justify-content: flex-start; }
     .status-pro__stage { flex-basis: 104px; min-width: 104px; }
     .status-pro__stage--current { min-width: 174px; }
+    .status-pro__export-fields { flex-direction: column; }
+    .status-pro__export-field-column { width: 100%; }
 }
 @container status-pro (max-width: 520px) {
     .status-pro__metrics { grid-template-columns: repeat(2, minmax(90px, 1fr)); }
@@ -6025,7 +6033,7 @@ class StatusProPlugin(WAN2GPPlugin):
             downloadText(`status-pro-${stamp}.json`, "application/json;charset=utf-8", JSON.stringify({
                 exported_at: exportedAt.toISOString(),
                 exported_at_local: localIsoTimestamp(exportedAt),
-                version: "1.0.1",
+                version: "1.0.3",
                 ...metadata,
                 runs: records
             }, null, 2));
@@ -6272,7 +6280,6 @@ class StatusProPlugin(WAN2GPPlugin):
                 heading.title = EXPORT_GROUP_HELP[field.group] || field.group;
                 group.appendChild(heading);
                 groups.set(field.group, group);
-                container.appendChild(group);
             }
             const label = document.createElement("label");
             label.className = "status-pro__export-field";
@@ -6284,6 +6291,21 @@ class StatusProPlugin(WAN2GPPlugin):
             caption.textContent = field.label;
             label.append(checkbox, caption);
             group.appendChild(label);
+        });
+        const groupPanels = Array.from(groups.values());
+        if (!groupPanels.length) return;
+        const columnCount = Math.min(3, groupPanels.length);
+        const columns = Array.from({length: columnCount}, () => {
+            const column = document.createElement("div");
+            column.className = "status-pro__export-field-column";
+            container.appendChild(column);
+            return column;
+        });
+        groupPanels.forEach((group, index) => {
+            const columnIndex = index < columnCount
+                ? index
+                : columns.length - 1 - ((index - columnCount) % columns.length);
+            columns[columnIndex].appendChild(group);
         });
         const promptGroup = groups.get("Prompts");
         if (promptGroup) {
