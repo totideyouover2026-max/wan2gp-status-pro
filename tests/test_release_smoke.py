@@ -176,6 +176,92 @@ for (const field of api.EXPORT_FIELD_DEFS) {
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_attention_mode_is_recorded_displayed_and_exported(self):
+        source = _source()
+        for key in ('"attention_mode"', '"override_attention"', '"attention_sparsity"'):
+            self.assertIn(key, source)
+        for requested_global in (
+            'self.request_global("attention_mode")',
+            'self.request_global("get_overridden_attention")',
+            'self.request_global("get_auto_attention")',
+        ):
+            self.assertIn(requested_global, source)
+
+        tree = ast.parse(source)
+        run_keys = next(
+            node for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "RUN_SETTING_KEYS" for target in node.targets)
+        )
+        helpers = [
+            node for node in tree.body
+            if isinstance(node, ast.FunctionDef) and node.name in {"_telemetry_value", "_task_telemetry"}
+        ]
+        namespace = {}
+        module = ast.Module(body=[run_keys, *helpers], type_ignores=[])
+        ast.fix_missing_locations(module)
+        exec(compile(module, str(PLUGIN_PATH), "exec"), namespace)
+        task_telemetry = namespace["_task_telemetry"]
+
+        sol = task_telemetry(
+            {"params": {"model_type": "minimax_h3", "override_attention": "sol", "attention_sparsity": 1.25}},
+            attention_mode="sage2",
+        )["settings"]
+        self.assertEqual(sol["attention_mode"], "sol")
+        self.assertEqual(sol["attention_sparsity"], 1.25)
+        self.assertNotIn("override_attention", sol)
+
+        automatic = task_telemetry(
+            {"params": {"model_type": "wan", "attention_sparsity": 1.0}},
+            attention_mode="auto",
+            get_auto_attention=lambda: "flash",
+        )["settings"]
+        self.assertEqual(automatic["attention_mode"], "flash")
+        self.assertNotIn("attention_sparsity", automatic)
+
+        model_specific = task_telemetry(
+            {"params": {"model_type": "ltx2"}},
+            attention_mode="sdpa",
+            get_overridden_attention=lambda _model_type: "sage3",
+        )["settings"]
+        self.assertEqual(model_specific["attention_mode"], "sage3")
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is required for attention-history validation")
+        javascript = _javascript_with_exports(
+            "attentionModeLabel",
+            "exportFieldValue",
+            "EXPORT_PRESETS",
+        )
+        test_script = r'''
+const api = globalThis.__statusProReleaseTest;
+const solSettings = {attention_mode: "sol", attention_sparsity: 1.25};
+if (api.attentionModeLabel(solSettings) !== "Sol Attention · tau 1.25") {
+  throw new Error("Sol attention and tau were not formatted together");
+}
+if (api.attentionModeLabel({attention_mode: "flash"}) !== "Flash Attention") {
+  throw new Error("Flash Attention was not given a readable label");
+}
+const run = {settings: solSettings};
+if (api.exportFieldValue(run, "attention_mode", new Set()) !== "sol") throw new Error("attention mode export failed");
+if (api.exportFieldValue(run, "attention_sparsity", new Set()) !== 1.25) throw new Error("Sol tau export failed");
+for (const preset of ["performance", "reproducibility", "share-safe"]) {
+  if (!api.EXPORT_PRESETS[preset].includes("attention_mode") || !api.EXPORT_PRESETS[preset].includes("attention_sparsity")) {
+    throw new Error(`${preset} preset omits attention settings`);
+  }
+}
+'''
+        result = subprocess.run(
+            [node, "-"],
+            input=javascript + "\n" + test_script,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_expanded_history_moves_and_restores_the_live_drawer(self):
         node = shutil.which("node")
         if not node:
@@ -280,6 +366,8 @@ const payload = {
     model_summary: "LTX-2 - 2.3 Distilled - Video - 960x512",
     model_name: "LTX-2 2.3 Distilled",
     checkpoint: "ltx-2.3-distilled-int8.safetensors",
+    attention_mode: "sol",
+    attention_sparsity: 1.25,
     resolution: "960x512",
     steps: 8,
     media_type: "video",
@@ -307,6 +395,9 @@ if (run.status !== "completed" || run.output_count !== 1) throw new Error("parti
 if (run.media_type !== "video" || run.frame_count !== 241) throw new Error("declared media metadata was lost without output paths");
 if (run.settings.model_filename !== "ltx-2.3-distilled-int8.safetensors" || run.settings.prompt !== "A retained test prompt") {
   throw new Error("export fields were not rebuilt into run settings");
+}
+if (run.settings.attention_mode !== "sol" || run.settings.attention_sparsity !== 1.25) {
+  throw new Error("attention export fields were not rebuilt into run settings");
 }
 if (run.step_summary.observed_passes !== 2 || run.step_summary.passes[1].configured_steps !== 3) {
   throw new Error("imported pass summaries were lost");

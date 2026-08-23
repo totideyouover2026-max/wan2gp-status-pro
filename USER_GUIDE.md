@@ -101,6 +101,8 @@ Each row summarizes the task, model family and variant, media type, resolution, 
 
 Expanded records use highlighted, top-aligned field labels to keep long values easier to scan. LoRAs are shown one per line using only the filename without `.safetensors`; hover the value for the complete captured source. Exports continue to contain the original LoRA values.
 
+**Attention mode** shows the effective implementation used for the run, including WanGP's global or model-specific default when no per-generation override was selected. Sol Attention also shows its tau value. The mode and tau are separate fields in JSON, CSV, and Markdown exports so performance comparisons can group or filter them independently.
+
 The **Observed timing composition** bar summarizes the measured stage durations across the run. Its colours identify Prepare, Inputs, Encode, Generate, Decode, Enhance, and Save. A diagonally striped **Unaccounted** segment represents wall-clock time that was not covered by an observed stage; it is not an error indicator or a second progress bar.
 
 In **Step observations**, the fastest valid Time value in each pass is highlighted in green and the slowest in red. Skipped observations are excluded, and the highlights indicate relative timing only—a slowest step is not necessarily faulty.

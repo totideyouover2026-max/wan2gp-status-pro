@@ -82,6 +82,7 @@ For a practical explanation of every stage, History, storage modes, exports, and
 - Summarizes each history row with its model platform, variant, media type, and resolution; the exact checkpoint remains in the expanded details.
 - Shows total wall-clock time, Wan2GP's recorded generation time, model/setup time, and only materially unaccounted time derived from observed phases.
 - Exposes model-specific Guidance 2 and Guidance 3 values, and labels frame counts without implying an unknown video duration.
+- Records the effective attention mode used by each run—such as Flash Attention, Sage, SDPA, or Sol Attention—and includes the Sol tau level when applicable.
 - Preserves aborted and failed outcomes as sticky states, with concise failure reasons such as GPU-memory exhaustion when observable.
 - Resolves each completed run as image, video, or audio from its outputs; image runs report one frame and audio runs omit frame count instead of inheriting stale video-form values.
 - Exports retained history as full JSON, analysis-friendly CSV, or readable Markdown.

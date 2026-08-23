@@ -43,6 +43,9 @@ RUN_SETTING_KEYS = (
     "guidance_phases",
     "flow_shift",
     "sample_solver",
+    "attention_mode",
+    "override_attention",
+    "attention_sparsity",
     "temporal_upsampling",
     "temporal_upsampling_method",
     "temporal_upsampling_multiplier",
@@ -390,6 +393,9 @@ def _task_telemetry(
     get_model_family=None,
     families_infos=None,
     component_resolver=None,
+    attention_mode=None,
+    get_overridden_attention=None,
+    get_auto_attention=None,
 ):
     if not isinstance(task, dict):
         return None
@@ -404,6 +410,24 @@ def _task_telemetry(
     if "prompt" not in settings and task.get("prompt") is not None:
         settings["prompt"] = _telemetry_value(task.get("prompt"))
     model_type = settings.get("model_type") or settings.get("base_model_type")
+    effective_attention = settings.get("override_attention") or settings.get("attention_mode")
+    if not effective_attention and model_type and callable(get_overridden_attention):
+        try:
+            effective_attention = get_overridden_attention(model_type)
+        except Exception:
+            pass
+    if not effective_attention:
+        effective_attention = attention_mode
+    if str(effective_attention or "").strip().lower() == "auto" and callable(get_auto_attention):
+        try:
+            effective_attention = get_auto_attention()
+        except Exception:
+            pass
+    if effective_attention:
+        settings["attention_mode"] = _telemetry_value(effective_attention)
+    if str(effective_attention or "").strip().lower() != "sol":
+        settings.pop("attention_sparsity", None)
+    settings.pop("override_attention", None)
     if model_type and callable(get_model_name):
         try:
             settings["model_name"] = _telemetry_value(get_model_name(model_type))
@@ -491,6 +515,11 @@ def _output_records(paths, settings_values, audio_hint=False):
             for key in RUN_SETTING_KEYS
             if key in raw_settings and raw_settings.get(key) is not None
         }
+        if not resolved.get("attention_mode") and resolved.get("override_attention"):
+            resolved["attention_mode"] = resolved["override_attention"]
+        if str(resolved.get("attention_mode") or "").strip().lower() != "sol":
+            resolved.pop("attention_sparsity", None)
+        resolved.pop("override_attention", None)
         for key in ("creation_date", "creation_timestamp", "generation_time"):
             if key in raw_settings and raw_settings.get(key) is not None:
                 resolved[key] = _telemetry_value(raw_settings.get(key))
@@ -636,6 +665,9 @@ class StatusProPlugin(WAN2GPPlugin):
         self.request_global("transformer_quantization")
         self.request_global("transformer_dtype_policy")
         self.request_global("text_encoder_quantization")
+        self.request_global("attention_mode")
+        self.request_global("get_overridden_attention")
+        self.request_global("get_auto_attention")
         self.request_global("build_callback")
         self.request_global("release_model")
         self.request_global("get_settings_from_file")
@@ -804,6 +836,9 @@ class StatusProPlugin(WAN2GPPlugin):
                 get_model_name=getattr(self, "get_model_name", None),
                 get_model_family=getattr(self, "get_model_family", None),
                 families_infos=getattr(self, "families_infos", None),
+                attention_mode=getattr(self, "attention_mode", None),
+                get_overridden_attention=getattr(self, "get_overridden_attention", None),
+                get_auto_attention=getattr(self, "get_auto_attention", None),
                 component_resolver=lambda settings: _model_components(
                     settings,
                     get_model_def=getattr(self, "get_model_def", None),
@@ -1399,6 +1434,8 @@ class StatusProPlugin(WAN2GPPlugin):
         { id: "guidance3", label: "Guidance 3", group: "Model & settings" },
         { id: "flow_shift", label: "Flow shift", group: "Model & settings" },
         { id: "sampler", label: "Sampler", group: "Model & settings" },
+        { id: "attention_mode", label: "Attention mode", group: "Model & settings" },
+        { id: "attention_sparsity", label: "Sol attention tau", group: "Model & settings" },
         { id: "loras", label: "LoRAs", group: "Model & settings" },
         { id: "settings", label: "Complete settings object", group: "Model & settings" },
         { id: "media_type", label: "Media type", group: "Media & output" },
@@ -1444,6 +1481,8 @@ class StatusProPlugin(WAN2GPPlugin):
         guidance3: "Third guidance value used by multi-guidance models.",
         flow_shift: "Scheduler flow-shift value used during generation.",
         sampler: "Sampling or solver method selected for denoising.",
+        attention_mode: "Effective attention implementation used for generation, including global or model-specific defaults.",
+        attention_sparsity: "Sol-Attn routing threshold (tau); applicable when Sol attention is selected.",
         loras: "Names of the LoRAs activated for the run.",
         settings: "The complete captured settings object; useful for detailed analysis but verbose.",
         media_type: "Whether the output is an image, video, audio file, or a mixture.",
@@ -1457,9 +1496,9 @@ class StatusProPlugin(WAN2GPPlugin):
     const EXPORT_FIELD_IDS = new Set(EXPORT_FIELD_DEFS.map(field => field.id));
     const EXPORT_PRESETS = {
         standard: EXPORT_FIELD_DEFS.filter(field => !field.prompt).map(field => field.id),
-        performance: ["queue_task_id", "status", "started_at", "completed_at", "duration_seconds", "generation_time", "phase_timings", "step_performance", "resource_usage", "step_skipping", "model_summary", "media_type", "resolution", "frame_count", "steps"],
-        reproducibility: ["queue_task_id", "model_name", "checkpoint", "media_type", "resolution", "frame_count", "fps", "steps", "seed", "guidance", "guidance2", "guidance3", "flow_shift", "sampler", "step_skipping", "loras", "prompt", "negative_prompt"],
-        "share-safe": ["queue_task_id", "status", "duration_seconds", "generation_time", "phase_timings", "resource_usage", "step_skipping", "model_summary", "media_type", "resolution", "frame_count", "steps"]
+        performance: ["queue_task_id", "status", "started_at", "completed_at", "duration_seconds", "generation_time", "phase_timings", "step_performance", "resource_usage", "step_skipping", "model_summary", "media_type", "resolution", "frame_count", "steps", "attention_mode", "attention_sparsity"],
+        reproducibility: ["queue_task_id", "model_name", "checkpoint", "media_type", "resolution", "frame_count", "fps", "steps", "seed", "guidance", "guidance2", "guidance3", "flow_shift", "sampler", "attention_mode", "attention_sparsity", "step_skipping", "loras", "prompt", "negative_prompt"],
+        "share-safe": ["queue_task_id", "status", "duration_seconds", "generation_time", "phase_timings", "resource_usage", "step_skipping", "model_summary", "media_type", "resolution", "frame_count", "steps", "attention_mode", "attention_sparsity"]
     };
 
     const STAGE_DEFS = [
@@ -4928,6 +4967,26 @@ class StatusProPlugin(WAN2GPPlugin):
         return String(value);
     }
 
+    function attentionModeLabel(settings) {
+        const value = setting(settings, "attention_mode", "override_attention");
+        if (value === null) return null;
+        const raw = String(value).trim();
+        const labels = {
+            auto: "Auto",
+            sdpa: "SDPA",
+            flash: "Flash Attention",
+            xformers: "xFormers",
+            sage: "Sage Attention",
+            sage2: "Sage Attention 2",
+            sage3: "Sage Attention 3",
+            radial: "Radial Attention",
+            sol: "Sol Attention"
+        };
+        const label = labels[raw.toLowerCase()] || raw;
+        const tau = setting(settings, "attention_sparsity");
+        return raw.toLowerCase() === "sol" && tau !== null ? `${label} · tau ${tau}` : label;
+    }
+
     function compactModelName(value) {
         if (Array.isArray(value)) return value.map(item => compactModelName(item)).join(", ");
         const raw = settingText(value);
@@ -5541,6 +5600,7 @@ class StatusProPlugin(WAN2GPPlugin):
             addRunField(fields, "Guidance 3", setting(settings, "guidance3_scale"));
             addRunField(fields, "Flow shift", setting(settings, "flow_shift"));
             addRunField(fields, "Sampler", setting(settings, "sample_solver"));
+            addRunField(fields, "Attention mode", attentionModeLabel(settings));
             addRunField(fields, "Step skipping", stepSkippingLabel(run));
             const stepSummary = run.step_summary || {};
             if (optionalNumber(stepSummary.recorded_steps) > 0) {
@@ -5845,6 +5905,8 @@ class StatusProPlugin(WAN2GPPlugin):
         if (fieldId === "guidance3") return setting(settings, "guidance3_scale");
         if (fieldId === "flow_shift") return setting(settings, "flow_shift");
         if (fieldId === "sampler") return setting(settings, "sample_solver");
+        if (fieldId === "attention_mode") return setting(settings, "attention_mode", "override_attention");
+        if (fieldId === "attention_sparsity") return setting(settings, "attention_sparsity");
         if (fieldId === "loras") return cloneJson(setting(settings, "activated_loras"), null);
         if (fieldId === "settings") return cleanPromptFields(settings, selectedFields);
         if (fieldId === "media_type") return run.media_type;
@@ -6028,6 +6090,8 @@ class StatusProPlugin(WAN2GPPlugin):
             setImportedSetting(settings, "guidance3_scale", source.guidance3);
             setImportedSetting(settings, "flow_shift", source.flow_shift);
             setImportedSetting(settings, "sample_solver", source.sampler);
+            setImportedSetting(settings, "attention_mode", source.attention_mode);
+            setImportedSetting(settings, "attention_sparsity", source.attention_sparsity);
             setImportedSetting(settings, "activated_loras", source.loras);
             setImportedSetting(settings, "prompt", source.prompt);
             setImportedSetting(settings, "negative_prompt", source.negative_prompt);
