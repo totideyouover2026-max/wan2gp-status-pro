@@ -2,7 +2,7 @@
 
 All notable Status Pro changes will be recorded here. Versions follow Semantic Versioning.
 
-## [1.0.5] - 2026-08-24
+## [1.0.4] - 2026-08-24
 
 ### Added
 

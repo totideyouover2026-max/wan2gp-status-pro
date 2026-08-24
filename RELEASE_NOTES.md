@@ -1,6 +1,6 @@
-# Status Pro v1.0.5
+# Status Pro v1.0.4
 
-Status Pro 1.0.5 improves generation-history reproducibility and makes detailed performance records easier to review. It observes WanGP's existing generation process and does not change model output or generation behaviour.
+Status Pro 1.0.4 improves generation-history reproducibility and makes detailed performance records easier to review. It observes WanGP's existing generation process and does not change model output or generation behaviour.
 
 ## What's new
 

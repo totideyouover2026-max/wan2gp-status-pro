@@ -75,7 +75,7 @@ class ReleaseSmokeTests(unittest.TestCase):
             self.assertTrue((ROOT / document).is_file(), document)
         manifest = json.loads((ROOT / "plugin_info.json").read_text(encoding="utf-8"))
         version = manifest["version"]
-        self.assertEqual(version, "1.0.5")
+        self.assertEqual(version, "1.0.4")
         self.assertIn(f'self.version = "{version}"', source)
         self.assertIn(f'version: "{version}"', source)
         self.assertEqual(manifest["type"], "extension")
@@ -690,7 +690,7 @@ if (savedExport.format !== "md" || savedExport.fields.length !== 2 || !savedExpo
     def test_history_recording_and_v105_history_display_helpers(self):
         node = shutil.which("node")
         if not node:
-            self.skipTest("Node is required for V1.0.5 history behavior validation")
+            self.skipTest("Node is required for V1.0.4 history behavior validation")
         javascript = _javascript_with_exports(
             "loadHistoryRecordingPreference",
             "setHistoryRecording",

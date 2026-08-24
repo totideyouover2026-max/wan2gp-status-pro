@@ -624,7 +624,7 @@ class StatusProPlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = "Status Pro"
-        self.version = "1.0.5"
+        self.version = "1.0.4"
         self.description = (
             "Selectable pipeline timeline with stage timings and live ETA estimates."
         )
@@ -6134,7 +6134,7 @@ class StatusProPlugin(WAN2GPPlugin):
             downloadText(`status-pro-${stamp}.json`, "application/json;charset=utf-8", JSON.stringify({
                 exported_at: exportedAt.toISOString(),
                 exported_at_local: localIsoTimestamp(exportedAt),
-                version: "1.0.5",
+                version: "1.0.4",
                 ...metadata,
                 runs: records
             }, null, 2));
