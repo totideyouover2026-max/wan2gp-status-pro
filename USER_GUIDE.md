@@ -105,7 +105,7 @@ Expanded records use highlighted, top-aligned field labels to keep long values e
 
 The **Observed timing composition** bar summarizes the measured stage durations across the run. Its colours identify Prepare, Inputs, Encode, Generate, Decode, Enhance, and Save. A diagonally striped **Unaccounted** segment represents wall-clock time that was not covered by an observed stage; it is not an error indicator or a second progress bar.
 
-In **Step observations**, the fastest valid Time value in each pass is highlighted in green and the slowest in red. Skipped observations are excluded, and the highlights indicate relative timing only—a slowest step is not necessarily faulty.
+In **Step observations**, the fastest valid Time value in each pass is highlighted in green and the slowest in red. Skipped observations are excluded, and the highlights indicate relative timing only—a slowest step is not necessarily faulty. When skipped observations are present, open the table and turn on **Hide skipped** to review only steps where work was performed. This filters the visible rows only; History storage and exports still contain the complete observations.
 
 Status Pro retains up to 100 run records. If browser storage cannot retain the full visible ledger, Status Pro reconciles the list with what was actually saved and displays a storage warning.
 

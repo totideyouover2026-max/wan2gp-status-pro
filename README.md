@@ -4,7 +4,7 @@ Status Pro replaces Wan2GP's main status presentation with a responsive pipeline
 
 ![Status Pro V1 overview showing live pipeline tracking, timing metrics, and browser-local history](SlideDeck/1.png)
 
-Status Pro 1.0.3 has been tested with **WanGP 12.452 and later**, but does not declare a hard minimum because its observers degrade gracefully and may also work with earlier releases. It has no additional required Python dependencies; process-memory telemetry uses `psutil` when WanGP already provides it and degrades gracefully when unavailable.
+Status Pro 1.0.5 has been tested with **WanGP 12.452 and later**, but does not declare a hard minimum because its observers degrade gracefully and may also work with earlier releases. It has no additional required Python dependencies; process-memory telemetry uses `psutil` when WanGP already provides it and degrades gracefully when unavailable.
 
 [User guide](USER_GUIDE.md) · [Installation](#install-and-enable) · [Release notes](RELEASE_NOTES.md)
 
@@ -127,6 +127,7 @@ For a practical explanation of every stage, History, storage modes, exports, and
 - Samples Wan2GP process RAM and active CUDA-device memory throughout each run, retains peak/average/start/end summaries, and attaches boundary samples to the per-step history.
 - Adds a scrollable step-performance table to expanded history entries and dedicated performance/resource fields to JSON, CSV, and Markdown exports.
 - Highlights the fastest and slowest valid step within each observed pass, while excluding skipped observations from that comparison.
+- Adds a per-table **Hide skipped** switch so worked observations can be reviewed without changing the complete retained or exported step telemetry.
 - Adds a measured stage-timing composition bar with a theme-aware striped segment for wall-clock time not covered by observed stages.
 - Uses clearer, top-aligned field labels in expanded History and shows compact filename-only LoRA names while preserving complete values in exports.
 - Treats Wan2GP's transition into Decode as completion of its final reported generation step, avoiding a misleading 7/8 finish.

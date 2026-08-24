@@ -75,7 +75,7 @@ class ReleaseSmokeTests(unittest.TestCase):
             self.assertTrue((ROOT / document).is_file(), document)
         manifest = json.loads((ROOT / "plugin_info.json").read_text(encoding="utf-8"))
         version = manifest["version"]
-        self.assertEqual(version, "1.0.3")
+        self.assertEqual(version, "1.0.5")
         self.assertIn(f'self.version = "{version}"', source)
         self.assertIn(f'version: "{version}"', source)
         self.assertEqual(manifest["type"], "extension")
@@ -687,10 +687,10 @@ if (savedExport.format !== "md" || savedExport.fields.length !== 2 || !savedExpo
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
-    def test_history_recording_and_v103_history_display_helpers(self):
+    def test_history_recording_and_v105_history_display_helpers(self):
         node = shutil.which("node")
         if not node:
-            self.skipTest("Node is required for V1.0.3 history behavior validation")
+            self.skipTest("Node is required for V1.0.5 history behavior validation")
         javascript = _javascript_with_exports(
             "loadHistoryRecordingPreference",
             "setHistoryRecording",
@@ -698,6 +698,7 @@ if (savedExport.format !== "md" || savedExport.fields.length !== 2 || !savedExpo
             "compactLoraNames",
             "timingOverviewSegments",
             "stepTimingOutliers",
+            "stepIsSkipped",
             "sessionCompletionSummary",
         )
         test_script = r'''
@@ -749,6 +750,9 @@ if (!outliers.fastest.has(1) || !outliers.slowest.has(2) || !outliers.fastest.ha
   throw new Error("per-pass fastest and slowest observations were not identified");
 }
 if (outliers.fastest.has(3)) throw new Error("skipped observations were included in timing outliers");
+if (!api.stepIsSkipped({skipped: true}) || !api.stepIsSkipped({skipped_delta: 2}) || api.stepIsSkipped({skipped: false, skipped_delta: 0})) {
+  throw new Error("skipped observation detection is incomplete");
+}
 
 const completion = api.sessionCompletionSummary([
   {id: "older", session_id: "s", queue_task_id: 1, started_at: 1000, completed_at: 31000, duration_seconds: 30, repeats: 1},
@@ -773,6 +777,9 @@ if (completion.latestFinishedAt !== 52000 || completion.latestDuration !== 12) t
         self.assertIn('repeating-linear-gradient', javascript_source)
         self.assertIn('chip.dataset.stage = timingStageId', javascript_source)
         self.assertIn('completed ? `${formatDuration(latestDuration)}` : ""', javascript_source)
+        self.assertIn('filterToggle.setAttribute("role", "switch")', javascript_source)
+        self.assertIn('Recorded data and exports are unchanged.', javascript_source)
+        self.assertIn('row.hidden = hideSkipped && row.dataset.skipped === "true"', javascript_source)
 
     def test_stage_media_outcome_and_export_regressions(self):
         node = shutil.which("node")

@@ -2,6 +2,12 @@
 
 All notable Status Pro changes will be recorded here. Versions follow Semantic Versioning.
 
+## [1.0.5] - 2026-08-24
+
+### Added
+
+- Step observation tables now offer a compact **Hide skipped** switch for reviewing only observations where work was performed; filtering is display-only and does not alter retained or exported telemetry.
+
 ## [1.0.3] - 2026-08-23
 
 ### Added

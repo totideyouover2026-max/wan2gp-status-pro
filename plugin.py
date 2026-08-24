@@ -624,7 +624,7 @@ class StatusProPlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = "Status Pro"
-        self.version = "1.0.3"
+        self.version = "1.0.5"
         self.description = (
             "Selectable pipeline timeline with stage timings and live ETA estimates."
         )
@@ -2418,6 +2418,65 @@ class StatusProPlugin(WAN2GPPlugin):
 .status-pro__step-log > summary::-webkit-details-marker { display: none; }
 .status-pro__step-log > summary::after { content: "⌄"; margin-left: auto; }
 .status-pro__step-log[open] > summary::after { content: "⌃"; }
+.status-pro__step-log-controls {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    min-height: 30px;
+    padding: 5px 9px;
+    background: color-mix(in srgb, var(--sp-panel-soft) 58%, transparent);
+}
+.status-pro__step-filter {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--sp-muted);
+    font-size: .64rem;
+    font-weight: 650;
+    cursor: pointer;
+    user-select: none;
+}
+.status-pro__step-filter input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+}
+.status-pro__step-filter-switch {
+    position: relative;
+    width: 28px;
+    height: 16px;
+    flex: 0 0 auto;
+    border: 1px solid var(--sp-border);
+    border-radius: 99px;
+    background: var(--sp-panel);
+    transition: border-color 150ms ease, background-color 150ms ease;
+}
+.status-pro__step-filter-switch::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--sp-muted);
+    transition: transform 150ms ease, background-color 150ms ease;
+}
+.status-pro__step-filter input:checked + .status-pro__step-filter-switch {
+    border-color: var(--sp-accent);
+    background: color-mix(in srgb, var(--sp-accent) 24%, var(--sp-panel));
+}
+.status-pro__step-filter input:checked + .status-pro__step-filter-switch::after {
+    transform: translateX(12px);
+    background: var(--sp-accent);
+}
+.status-pro__step-filter input:focus-visible + .status-pro__step-filter-switch {
+    outline: 2px solid var(--sp-accent);
+    outline-offset: 2px;
+}
 .status-pro__step-log-table-wrap {
     max-height: 260px;
     overflow: auto;
@@ -2446,6 +2505,7 @@ class StatusProPlugin(WAN2GPPlugin):
     font-size: .6rem;
     text-transform: uppercase;
 }
+.status-pro__step-log tbody tr[hidden] { display: none; }
 .status-pro__step-skipped { color: #f59e0b; font-weight: 700; }
 .status-pro__step-fastest {
     background: color-mix(in srgb, #22c55e 17%, transparent);
@@ -5340,7 +5400,7 @@ class StatusProPlugin(WAN2GPPlugin):
         const groups = new Map();
         steps.forEach((step, index) => {
             const duration = optionalNumber(step && step.duration_seconds);
-            if (!Number.isFinite(duration) || duration < 0 || step.skipped === true) return;
+            if (!Number.isFinite(duration) || duration < 0 || stepIsSkipped(step)) return;
             const passNo = optionalNumber(step.pass_no);
             const phaseNo = optionalNumber(step.phase);
             const key = Number.isFinite(passNo) && passNo > 0
@@ -5362,6 +5422,10 @@ class StatusProPlugin(WAN2GPPlugin):
             });
         });
         return {fastest, slowest};
+    }
+
+    function stepIsSkipped(step) {
+        return Boolean(step && (step.skipped === true || optionalNumber(step.skipped_delta) > 0));
     }
 
     function addImportedMediaField(container, run, records, pending = false) {
@@ -5427,6 +5491,7 @@ class StatusProPlugin(WAN2GPPlugin):
     function appendStepPerformance(body, run) {
         const steps = Array.isArray(run.step_performance) ? run.step_performance : [];
         if (!steps.length) return;
+        const skippedCount = steps.filter(stepIsSkipped).length;
         const details = document.createElement("details");
         details.className = "status-pro__step-log";
         const summary = document.createElement("summary");
@@ -5438,6 +5503,26 @@ class StatusProPlugin(WAN2GPPlugin):
             ? "Latest observations · source truncated"
             : `${observedPasses > 1 ? `${observedPasses} passes · ` : ""}Time · skipping · memory`;
         summary.append(label, hint);
+        let filterToggle = null;
+        let filterControls = null;
+        if (skippedCount > 0) {
+            filterControls = document.createElement("div");
+            filterControls.className = "status-pro__step-log-controls";
+            const filter = document.createElement("label");
+            filter.className = "status-pro__step-filter";
+            filter.title = "Hide observations where WanGP reported that step work was skipped. Recorded data and exports are unchanged.";
+            filterToggle = document.createElement("input");
+            filterToggle.type = "checkbox";
+            filterToggle.setAttribute("role", "switch");
+            filterToggle.setAttribute("aria-label", `Hide ${skippedCount} skipped step observation${skippedCount === 1 ? "" : "s"}`);
+            const switchTrack = document.createElement("span");
+            switchTrack.className = "status-pro__step-filter-switch";
+            switchTrack.setAttribute("aria-hidden", "true");
+            const filterCaption = document.createElement("span");
+            filterCaption.textContent = `Hide skipped (${skippedCount})`;
+            filter.append(filterToggle, switchTrack, filterCaption);
+            filterControls.appendChild(filter);
+        }
         const wrap = document.createElement("div");
         wrap.className = "status-pro__step-log-table-wrap";
         const table = document.createElement("table");
@@ -5453,8 +5538,10 @@ class StatusProPlugin(WAN2GPPlugin):
         const outliers = stepTimingOutliers(steps);
         steps.forEach((step, stepIndex) => {
             const row = document.createElement("tr");
+            const skippedStep = stepIsSkipped(step);
+            row.dataset.skipped = skippedStep ? "true" : "false";
             const memory = step && step.memory || {};
-            const skipped = step.skipped === true ? (optionalNumber(step.skipped_delta) > 1 ? `Yes (×${step.skipped_delta})` : "Yes") : (step.skipped === false ? "No" : "—");
+            const skipped = skippedStep ? (optionalNumber(step.skipped_delta) > 1 ? `Yes (×${step.skipped_delta})` : "Yes") : (step.skipped === false ? "No" : "—");
             const passNo = optionalNumber(step.pass_no);
             const phaseNo = optionalNumber(step.phase);
             const values = [
@@ -5470,7 +5557,7 @@ class StatusProPlugin(WAN2GPPlugin):
             values.forEach((value, index) => {
                 const cell = document.createElement("td");
                 cell.textContent = value === null || value === undefined ? "—" : String(value);
-                if (index === 3 && step.skipped === true) cell.className = "status-pro__step-skipped";
+                if (index === 3 && skippedStep) cell.className = "status-pro__step-skipped";
                 if (index === 2 && outliers.fastest.has(stepIndex)) {
                     cell.className = "status-pro__step-fastest";
                     cell.title = "Fastest observed step in this pass";
@@ -5482,9 +5569,23 @@ class StatusProPlugin(WAN2GPPlugin):
             });
             tableBody.appendChild(row);
         });
+        if (filterToggle) {
+            filterToggle.addEventListener("change", () => {
+                const hideSkipped = filterToggle.checked;
+                Array.from(tableBody.rows).forEach(row => {
+                    row.hidden = hideSkipped && row.dataset.skipped === "true";
+                });
+                const visibleCount = hideSkipped ? steps.length - skippedCount : steps.length;
+                label.textContent = hideSkipped
+                    ? `Step observations (${visibleCount} of ${steps.length})`
+                    : `Step observations (${steps.length})`;
+            });
+        }
         table.append(head, tableBody);
         wrap.appendChild(table);
-        details.append(summary, wrap);
+        details.append(summary);
+        if (filterControls) details.appendChild(filterControls);
+        details.appendChild(wrap);
         body.appendChild(details);
     }
 
@@ -6033,7 +6134,7 @@ class StatusProPlugin(WAN2GPPlugin):
             downloadText(`status-pro-${stamp}.json`, "application/json;charset=utf-8", JSON.stringify({
                 exported_at: exportedAt.toISOString(),
                 exported_at_local: localIsoTimestamp(exportedAt),
-                version: "1.0.3",
+                version: "1.0.5",
                 ...metadata,
                 runs: records
             }, null, 2));
