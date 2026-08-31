@@ -147,6 +147,8 @@ Use **This session** to focus on runs from the active Status Pro working session
 
 The number beside **History** counts task groups rather than every underlying window. Hover over the History button to see both the task and recorded-run totals.
 
+Post-processing is recorded separately from the generation model. When upsampling, visual refinement, or film grain runs as part of generation, the history title keeps the generation model and adds a concise **Post:** summary. Expanding the record shows **Generation output (same task)** and lists every recorded operation. Applying processing to an already-selected gallery file creates a separate late-processing task whose title is led by those operations and whose expanded context reads **Selected gallery file (separate task)**. Structured exports retain the same `application`, summary, raw processor values, and available handler/model metadata.
+
 Select the **⛶ Expand history** button at the end of the History toolbar when the embedded list feels cramped. It opens the same history drawer in a large modal workspace with a fixed toolbar and a taller scrolling record list. Your selected entries and expanded tasks/runs are preserved because this is the same live history view, not a separate copy. Close it with **Esc**, the × button, by selecting ⛶ again, or by clicking outside the modal; the drawer returns to its normal position without scrolling the WanGP page.
 
 ### Opening an output in the gallery
@@ -274,6 +276,10 @@ Early estimates have only a few completed steps to learn from. The value should 
 ### Why does the terminal timing differ slightly?
 
 Status Pro observes WanGP from the browser at short intervals. Small differences from internal terminal timings are normal.
+
+### What happens if WanGP is minimized during generation?
+
+Browsers can pause or heavily throttle live page timers while a window is minimized. When the page resumes, Status Pro recovers missed Generate and LTX refinement timing, steps, and subwindow phases from WanGP callbacks retained by the plugin backend. Prepare or Encode work that emitted no durable callback is marked **Not reported** rather than being assigned an invented duration.
 
 ### Why are there more step observations than configured steps?
 

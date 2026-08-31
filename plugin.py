@@ -52,6 +52,8 @@ RUN_SETTING_KEYS = (
     "spatial_upsampling",
     "spatial_upsampling_method",
     "spatial_upsampling_ratio",
+    "film_grain_intensity",
+    "film_grain_saturation",
     "activated_loras",
     "loras_multipliers",
     "video_prompt_type",
@@ -70,8 +72,44 @@ MODEL_WEIGHT_EXTENSIONS = (
     ".pth",
     ".bin",
 )
+LTX_POSTPROCESSING_MODEL_TYPES = {
+    "ltx23": ("ltx2_22B", "LTX-2 2.3 Pixel Spatial Upscaler"),
+    "ltx25": ("ltx2_25_22B_distilled", "LTX-2 2.5 Pixel Spatial Upscaler"),
+}
+LTX_POSTPROCESSING_STEPS = 8
 MAX_STEP_TELEMETRY = 300
 _PROCESS = psutil.Process(os.getpid()) if psutil is not None else None
+
+
+def _ltx_component_fallbacks(model_type):
+    """Return accurate role labels when WanGP cannot expose exact resolved files."""
+    normalized = str(model_type or "").strip().lower()
+    if normalized == "ltx2_25_22b_distilled":
+        return {
+            "prepare": ["LTX-2.5 22B distilled transformer"],
+            "input": ["LTX-2.5 video VAE", "LTX-2.5 audio VAE"],
+            "encode": ["Gemma 4 12B LTX v1 text encoder"],
+            "decode": ["LTX-2.5 video VAE", "LTX-2.5 audio VAE"],
+        }
+    if normalized == "ltx2_22b":
+        return {
+            "prepare": ["LTX-2.3 22B transformer"],
+            "input": ["LTX-2.3 video VAE", "LTX-2.3 audio VAE"],
+            "encode": ["Gemma 3 12B LTX text encoder"],
+            "decode": ["LTX-2.3 video VAE", "LTX-2.3 audio VAE"],
+        }
+    return {}
+
+
+def _complete_ltx_components(model_type, components):
+    fallbacks = _ltx_component_fallbacks(model_type)
+    if not fallbacks:
+        return components if isinstance(components, dict) else {}
+    completed = dict(components) if isinstance(components, dict) else {}
+    for stage, values in fallbacks.items():
+        if not completed.get(stage):
+            completed[stage] = list(values)
+    return completed
 
 
 class _ModelLifecycleTelemetry:
@@ -185,12 +223,93 @@ def _performance_snapshot(gen):
             steps.append({str(key)[:80]: _telemetry_value(value) for key, value in item.items()})
     return {
         "id": str(source.get("id") or "")[:120],
+        "task_id": _telemetry_value(source.get("task_id")),
         "started_at": _telemetry_value(source.get("started_at")),
         "callback_phase": _telemetry_value(source.get("callback_phase", 0)),
         "phase_started_at": _telemetry_value(source.get("phase_started_at")),
         "steps": steps,
         "steps_truncated": bool(source.get("steps_truncated")),
     }
+
+
+def _latest_performance_snapshot(gen, latest_performance=None):
+    """Prefer the newest observer even if WanGP has replaced its mutable gen state."""
+    gen_source = gen.get("status_pro_performance") if isinstance(gen, dict) else None
+    candidates = [source for source in (gen_source, latest_performance) if isinstance(source, dict)]
+    if not candidates:
+        return None
+    source = max(
+        candidates,
+        key=lambda value: (
+            float(value.get("started_at") or 0),
+            len(value.get("steps") or []),
+        ),
+    )
+    return _performance_snapshot({"status_pro_performance": source})
+
+
+def _new_performance_observer(task_id=None):
+    observer = {
+        "id": f"{time.time_ns()}",
+        "started_at": time.time(),
+        "callback_phase": 0,
+        "phase_started_at": None,
+        "steps": [],
+        "steps_truncated": False,
+        "_last_step_at": time.perf_counter(),
+        "_phase_label": "",
+        "_last_step": None,
+        "_next_sequence": 0,
+    }
+    if task_id is not None:
+        observer["task_id"] = _telemetry_value(task_id)
+    return observer
+
+
+def _observe_postprocessing_progress(performance, progress_callback, torch_module=None):
+    """Capture registered postprocessor progress callbacks without inventing steps."""
+    def observed(phase, current_step=None, total_steps=None):
+        try:
+            current = int(current_step) if current_step is not None else None
+            total = int(total_steps) if total_steps is not None else None
+        except (TypeError, ValueError):
+            current = total = None
+        label = str(phase or "").strip()[:300]
+        if current is not None and total is not None and current > 0 and total > 0:
+            previous_step = performance.get("_last_step")
+            previous_label = str(performance.get("_phase_label") or "")
+            if label != previous_label or (previous_step is not None and current <= previous_step):
+                if previous_label:
+                    performance["callback_phase"] = int(performance.get("callback_phase") or 0) + 1
+                performance["phase_started_at"] = time.time()
+                performance["_phase_label"] = label
+                performance["_last_step"] = None
+            if current != performance.get("_last_step"):
+                now = time.perf_counter()
+                performance["_next_sequence"] = int(performance.get("_next_sequence") or 0) + 1
+                performance["steps"].append({
+                    "sequence": performance["_next_sequence"],
+                    "phase": int(performance.get("callback_phase") or 0),
+                    "step": current,
+                    "total_steps": total,
+                    "pass_no": -1,
+                    "duration_seconds": round(max(0.0, now - float(performance.get("_last_step_at") or now)), 4),
+                    "skip_method": None,
+                    "skipped": None,
+                    "skipped_delta": None,
+                    "skipped_total": None,
+                    "completed_at": time.time(),
+                    "memory": _memory_snapshot(torch_module),
+                    "label": label,
+                })
+                if len(performance["steps"]) > MAX_STEP_TELEMETRY:
+                    performance["steps"] = performance["steps"][-MAX_STEP_TELEMETRY:]
+                    performance["steps_truncated"] = True
+                performance["_last_step_at"] = now
+                performance["_last_step"] = current
+        return progress_callback(phase, current_step, total_steps)
+
+    return observed
 
 
 def _component_filename(value):
@@ -384,7 +503,172 @@ def _model_components(
                 unique.append(value)
         if unique:
             components[stage] = unique
-    return components
+    return _complete_ltx_components(model_type, components)
+
+
+def _normalize_late_postprocessing_settings(settings):
+    """Replace generation-form state with the model a standalone edit actually uses."""
+    if not isinstance(settings, dict):
+        return settings
+    mode = str(settings.get("mode") or "").strip().lower()
+    if mode not in {"edit_postprocessing", "edit_remux", "edit_audio"}:
+        return settings
+
+    # WanGP's late-edit forms can retain whichever generation model is selected in
+    # the main UI. It is not used by the edit task and must not become its history
+    # model. Model-backed processors are mapped to the model they load explicitly.
+    for key in (
+        "model_type",
+        "base_model_type",
+        "model_filename",
+        "config",
+        "model_name",
+        "model_family",
+        "component_models",
+        "activated_loras",
+        "loras_multipliers",
+        "attention_mode",
+        "override_attention",
+        "attention_sparsity",
+    ):
+        settings.pop(key, None)
+
+    effective_model_type = None
+    if mode == "edit_postprocessing":
+        spatial_upsampling = str(settings.get("spatial_upsampling") or "").strip().lower()
+        for method, (model_type, model_name) in LTX_POSTPROCESSING_MODEL_TYPES.items():
+            if spatial_upsampling.startswith(method):
+                effective_model_type = model_type
+                settings["model_name"] = model_name
+                settings["model_family"] = "LTX-2"
+                break
+
+    if effective_model_type:
+        settings["model_type"] = effective_model_type
+        settings["num_inference_steps"] = LTX_POSTPROCESSING_STEPS
+    return settings
+
+
+def _fallback_postprocessing_label(value, methods):
+    text = str(value or "").strip()
+    lowered = text.lower()
+    for method, label in sorted(methods.items(), key=lambda item: len(item[0]), reverse=True):
+        if not lowered.startswith(method):
+            continue
+        multiplier = lowered[len(method):]
+        try:
+            scale = float(multiplier)
+        except (TypeError, ValueError):
+            scale = None
+        if scale is not None:
+            scale_text = str(int(scale)) if scale.is_integer() else f"{scale:g}"
+            return f"{label} x{scale_text}"
+        return label
+    return text
+
+
+def _postprocessing_metadata(settings):
+    """Describe post-processing independently from the generation model."""
+    if not isinstance(settings, dict):
+        return None
+    operations = []
+    temporal = str(settings.get("temporal_upsampling") or "").strip()
+    if temporal:
+        temporal_details = {}
+        try:
+            from postprocessing import temporal_upsamplers as temporal_api
+            temporal_label = temporal_api.format_temporal_upsampling_label(temporal)
+            temporal_handler = temporal_api.find_temporal_upsampler(temporal)
+            temporal_split = temporal_handler.split_value(temporal) if temporal_handler is not None else None
+            if temporal_handler is not None:
+                temporal_details["processor"] = str(
+                    temporal_handler.query_temporal_upsampler_def().get("name") or temporal_handler.__class__.__name__
+                )[:300]
+            if temporal_split is not None:
+                temporal_details["method"] = str(temporal_split[0])[:200]
+                temporal_details["scale"] = float(temporal_split[1])
+        except Exception:
+            temporal_label = _fallback_postprocessing_label(temporal, {"rife": "RIFE"})
+        operation = {
+            "kind": "temporal_upsampling",
+            "label": str(temporal_label or temporal)[:500],
+            "value": temporal[:300],
+        }
+        operation.update(temporal_details)
+        operations.append(operation)
+
+    spatial = str(settings.get("spatial_upsampling") or "").strip()
+    if spatial:
+        spatial_details = {}
+        try:
+            from postprocessing import spatial_upsamplers as spatial_api
+            spatial_label = spatial_api.format_upsampling_label(spatial)
+            spatial_handler = spatial_api.find_upsampler(spatial)
+            spatial_split = spatial_handler.split_value(spatial) if spatial_handler is not None else None
+            if spatial_handler is not None:
+                spatial_details["processor"] = str(
+                    spatial_handler.query_upsampler_def().get("name") or spatial_handler.__class__.__name__
+                )[:300]
+            if spatial_split is not None:
+                spatial_details["method"] = str(spatial_split[0])[:200]
+                spatial_details["scale"] = float(spatial_split[1])
+        except Exception:
+            spatial_label = _fallback_postprocessing_label(spatial, {
+                "flashvsr2pass": "FlashVSR Two Pass",
+                "flashvsr": "FlashVSR",
+                "seedvr2": "SeedVR2",
+                "lanczos": "Lanczos",
+                "ltx25": "LTX 2.5 Pixel Spatial Upscaler",
+                "ltx23": "LTX 2.3 Pixel Spatial Upscaler",
+                "coz": "Chain of Zoom",
+            })
+        operation = {
+            "kind": "spatial_upsampling",
+            "label": str(spatial_label or spatial)[:500],
+            "value": spatial[:300],
+        }
+        operation.update(spatial_details)
+        lowered_spatial = spatial.lower()
+        for method, (model_type, model_name) in LTX_POSTPROCESSING_MODEL_TYPES.items():
+            if lowered_spatial.startswith(method):
+                operation["model"] = {"model_type": model_type, "model_name": model_name}
+                operation["steps"] = LTX_POSTPROCESSING_STEPS
+                break
+        operations.append(operation)
+
+    intensity = settings.get("film_grain_intensity")
+    try:
+        intensity_value = float(intensity)
+    except (TypeError, ValueError):
+        intensity_value = 0
+    if intensity_value > 0:
+        saturation = settings.get("film_grain_saturation")
+        try:
+            saturation_value = float(saturation)
+        except (TypeError, ValueError):
+            saturation_value = None
+        intensity_label = f"{intensity_value:g}"
+        label = f"Film grain (intensity {intensity_label}"
+        if saturation_value is not None:
+            label += f", saturation {saturation_value:g}"
+        label += ")"
+        operation = {
+            "kind": "film_grain",
+            "label": label,
+            "intensity": intensity_value,
+        }
+        if saturation_value is not None:
+            operation["saturation"] = saturation_value
+        operations.append(operation)
+
+    if not operations:
+        return None
+    mode = str(settings.get("mode") or "").strip().lower()
+    return {
+        "application": "late" if mode == "edit_postprocessing" else "inline",
+        "summary": " · ".join(operation["label"] for operation in operations)[:1500],
+        "operations": operations,
+    }
 
 
 def _task_telemetry(
@@ -409,6 +693,10 @@ def _task_telemetry(
     settings.setdefault("video_length", _telemetry_value(task.get("length")))
     if "prompt" not in settings and task.get("prompt") is not None:
         settings["prompt"] = _telemetry_value(task.get("prompt"))
+    _normalize_late_postprocessing_settings(settings)
+    postprocessing = _postprocessing_metadata(settings)
+    if postprocessing:
+        settings["postprocessing"] = postprocessing
     model_type = settings.get("model_type") or settings.get("base_model_type")
     effective_attention = settings.get("override_attention") or settings.get("attention_mode")
     if not effective_attention and model_type and callable(get_overridden_attention):
@@ -416,7 +704,7 @@ def _task_telemetry(
             effective_attention = get_overridden_attention(model_type)
         except Exception:
             pass
-    if not effective_attention:
+    if not effective_attention and model_type:
         effective_attention = attention_mode
     if str(effective_attention or "").strip().lower() == "auto" and callable(get_auto_attention):
         try:
@@ -428,12 +716,12 @@ def _task_telemetry(
     if str(effective_attention or "").strip().lower() != "sol":
         settings.pop("attention_sparsity", None)
     settings.pop("override_attention", None)
-    if model_type and callable(get_model_name):
+    if model_type and not settings.get("model_name") and callable(get_model_name):
         try:
             settings["model_name"] = _telemetry_value(get_model_name(model_type))
         except Exception:
             pass
-    if model_type and callable(get_model_family) and isinstance(families_infos, dict):
+    if model_type and not settings.get("model_family") and callable(get_model_family) and isinstance(families_infos, dict):
         try:
             family_key = get_model_family(model_type, for_ui=True)
             family_info = families_infos.get(family_key)
@@ -441,13 +729,30 @@ def _task_telemetry(
                 settings["model_family"] = _telemetry_value(family_info[1])
         except Exception:
             pass
+    resolved_component_models = {}
     if callable(component_resolver):
         try:
-            component_models = component_resolver(settings)
-            if component_models:
-                settings["component_models"] = _telemetry_value(component_models)
+            resolved_component_models = component_resolver(settings) or {}
+            resolved_component_models = _complete_ltx_components(model_type, resolved_component_models)
+            if resolved_component_models:
+                settings["component_models"] = _telemetry_value(resolved_component_models)
         except Exception:
             pass
+    if postprocessing:
+        for operation in postprocessing.get("operations", []):
+            backing_model = operation.get("model") if isinstance(operation, dict) else None
+            backing_model_type = backing_model.get("model_type") if isinstance(backing_model, dict) else None
+            if not backing_model_type:
+                continue
+            backing_components = resolved_component_models if backing_model_type == model_type else {}
+            if not backing_components and callable(component_resolver):
+                try:
+                    backing_components = component_resolver({"model_type": backing_model_type}) or {}
+                except Exception:
+                    backing_components = {}
+            backing_components = _complete_ltx_components(backing_model_type, backing_components)
+            if backing_components:
+                backing_model["component_models"] = _telemetry_value(backing_components)
     return {
         "id": _telemetry_value(task.get("id")),
         "client_id": str(params.get("client_id") or "")[:200],
@@ -624,13 +929,16 @@ class StatusProPlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = "Status Pro"
-        self.version = "1.0.4"
+        self.version = "1.0.5"
         self.description = (
             "Selectable pipeline timeline with stage timings and live ETA estimates."
         )
         self._runtime_id = str(uuid.uuid4())
         self._insertion_registered = False
         self._step_observer_installed = False
+        self._postprocessing_step_observer_installed = False
+        self._latest_performance = None
+        self._active_task_id = None
         self._model_lifecycle_observer_installed = False
 
     def setup_ui(self):
@@ -669,6 +977,7 @@ class StatusProPlugin(WAN2GPPlugin):
         self.request_global("get_overridden_attention")
         self.request_global("get_auto_attention")
         self.request_global("build_callback")
+        self.request_global("perform_spatial_upsampling")
         self.request_global("release_model")
         self.request_global("get_settings_from_file")
         self.request_global("save_path")
@@ -735,16 +1044,13 @@ class StatusProPlugin(WAN2GPPlugin):
             callback = original_builder(state, pipe, *args, **kwargs)
             state = state if isinstance(state, dict) else {}
             gen = state.get("gen") if isinstance(state.get("gen"), dict) else {}
+            queue = gen.get("queue") if isinstance(gen.get("queue"), list) else []
+            task_id = queue[0].get("id") if queue and isinstance(queue[0], dict) else None
             observer_id = f"{time.time_ns()}"
-            performance = {
-                "id": observer_id,
-                "started_at": time.time(),
-                "callback_phase": 0,
-                "phase_started_at": None,
-                "steps": [],
-                "steps_truncated": False,
-            }
+            performance = _new_performance_observer(task_id)
+            performance["id"] = observer_id
             gen["status_pro_performance"] = performance
+            self._latest_performance = performance
             last_step_at = time.perf_counter()
             last_skip_count = _skip_count(pipe)
             phase_index = 0
@@ -826,11 +1132,47 @@ class StatusProPlugin(WAN2GPPlugin):
         self.set_global("build_callback", observed_builder)
         self._step_observer_installed = True
 
+    def _install_postprocessing_step_observer(self):
+        if self._postprocessing_step_observer_installed:
+            return
+        original = getattr(self, "perform_spatial_upsampling", None)
+        if not callable(original):
+            return
+        if getattr(original, "_status_pro_postprocessing_step_observer", False):
+            self._postprocessing_step_observer_installed = True
+            return
+        torch_module = getattr(self, "torch", None)
+
+        @wraps(original)
+        def observed(*args, **kwargs):
+            spatial_upsampling = kwargs.get(
+                "spatial_upsampling",
+                args[1] if len(args) > 1 else "",
+            )
+            progress_callback = kwargs.get("progress_callback")
+            lowered = str(spatial_upsampling or "").strip().lower()
+            if callable(progress_callback) and lowered.startswith(tuple(LTX_POSTPROCESSING_MODEL_TYPES)):
+                performance = _new_performance_observer(self._active_task_id)
+                self._latest_performance = performance
+                kwargs["progress_callback"] = _observe_postprocessing_progress(
+                    performance,
+                    progress_callback,
+                    torch_module,
+                )
+            return original(*args, **kwargs)
+
+        observed._status_pro_postprocessing_step_observer = True
+        self.set_global("perform_spatial_upsampling", observed)
+        self.perform_spatial_upsampling = observed
+        self._postprocessing_step_observer_installed = True
+
     def _run_snapshot_json(self, state):
         try:
             state = state if isinstance(state, dict) else {}
             gen = state.get("gen") if isinstance(state.get("gen"), dict) else {}
             queue = gen.get("queue") if isinstance(gen.get("queue"), list) else []
+            if gen.get("in_progress") and queue and isinstance(queue[0], dict):
+                self._active_task_id = queue[0].get("id")
             active_task = _task_telemetry(
                 queue[0],
                 get_model_name=getattr(self, "get_model_name", None),
@@ -890,7 +1232,7 @@ class StatusProPlugin(WAN2GPPlugin):
                 "progress_phase": _telemetry_value(gen.get("progress_phase")),
                 "queue_errors": _telemetry_value(gen.get("queue_errors") or {}),
                 "resource_sample": _memory_snapshot(getattr(self, "torch", None)) if gen.get("in_progress") else None,
-                "performance": _performance_snapshot(gen),
+                "performance": _latest_performance_snapshot(gen, self._latest_performance),
                 "model_lifecycle": MODEL_LIFECYCLE_TELEMETRY.snapshot(),
             }
             return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
@@ -906,6 +1248,7 @@ class StatusProPlugin(WAN2GPPlugin):
             return
 
         self._install_step_observer()
+        self._install_postprocessing_step_observer()
         self._install_model_lifecycle_observer()
 
         state_component = components.get("state")
@@ -1423,6 +1766,7 @@ class StatusProPlugin(WAN2GPPlugin):
         { id: "resource_usage", label: "RAM / VRAM usage", group: "Performance" },
         { id: "step_skipping", label: "Step-skipping configuration and results", group: "Performance" },
         { id: "model_summary", label: "Model summary", group: "Model & settings" },
+        { id: "postprocessing", label: "Post-processing operations", group: "Model & settings" },
         { id: "model_name", label: "Model display name", group: "Model & settings" },
         { id: "checkpoint", label: "Checkpoint / source", group: "Model & settings" },
         { id: "resolution", label: "Resolution", group: "Model & settings" },
@@ -1470,6 +1814,7 @@ class StatusProPlugin(WAN2GPPlugin):
         resource_usage: "Observed process RAM and GPU memory averages and peaks.",
         step_skipping: "Configured cache or skipping method and the skips Status Pro observed.",
         model_summary: "A compact human-readable model, variant, media type, and resolution summary.",
+        postprocessing: "Structured temporal, spatial, and film-grain operations, including whether they ran inline or as a separate late-processing task.",
         model_name: "WanGP's display name for the selected model.",
         checkpoint: "The selected checkpoint filename or source reference.",
         resolution: "Requested output width and height.",
@@ -1496,9 +1841,9 @@ class StatusProPlugin(WAN2GPPlugin):
     const EXPORT_FIELD_IDS = new Set(EXPORT_FIELD_DEFS.map(field => field.id));
     const EXPORT_PRESETS = {
         standard: EXPORT_FIELD_DEFS.filter(field => !field.prompt).map(field => field.id),
-        performance: ["queue_task_id", "status", "started_at", "completed_at", "duration_seconds", "generation_time", "phase_timings", "step_performance", "resource_usage", "step_skipping", "model_summary", "media_type", "resolution", "frame_count", "steps", "attention_mode", "attention_sparsity"],
-        reproducibility: ["queue_task_id", "model_name", "checkpoint", "media_type", "resolution", "frame_count", "fps", "steps", "seed", "guidance", "guidance2", "guidance3", "flow_shift", "sampler", "attention_mode", "attention_sparsity", "step_skipping", "loras", "prompt", "negative_prompt"],
-        "share-safe": ["queue_task_id", "status", "duration_seconds", "generation_time", "phase_timings", "resource_usage", "step_skipping", "model_summary", "media_type", "resolution", "frame_count", "steps", "attention_mode", "attention_sparsity"]
+        performance: ["queue_task_id", "status", "started_at", "completed_at", "duration_seconds", "generation_time", "phase_timings", "step_performance", "resource_usage", "step_skipping", "model_summary", "postprocessing", "media_type", "resolution", "frame_count", "steps", "attention_mode", "attention_sparsity"],
+        reproducibility: ["queue_task_id", "model_name", "checkpoint", "postprocessing", "media_type", "resolution", "frame_count", "fps", "steps", "seed", "guidance", "guidance2", "guidance3", "flow_shift", "sampler", "attention_mode", "attention_sparsity", "step_skipping", "loras", "prompt", "negative_prompt"],
+        "share-safe": ["queue_task_id", "status", "duration_seconds", "generation_time", "phase_timings", "resource_usage", "step_skipping", "model_summary", "postprocessing", "media_type", "resolution", "frame_count", "steps", "attention_mode", "attention_sparsity"]
     };
 
     const STAGE_DEFS = [
@@ -3269,6 +3614,12 @@ class StatusProPlugin(WAN2GPPlugin):
         observeResourceSample(run, telemetry.resource_sample);
         const performance = telemetry.performance;
         if (!performance || typeof performance !== "object") return;
+        const observerTaskId = performance.task_id;
+        if (
+            observerTaskId !== null && observerTaskId !== undefined &&
+            run.queue_task_id !== null && run.queue_task_id !== undefined &&
+            String(observerTaskId) !== String(run.queue_task_id)
+        ) return;
         const observerId = String(performance.id || "observer");
         run.step_performance = Array.isArray(run.step_performance) ? run.step_performance : [];
         run._performance_step_keys = run._performance_step_keys || {};
@@ -3283,6 +3634,7 @@ class StatusProPlugin(WAN2GPPlugin):
             run._performance_step_keys[key] = true;
             const copy = cloneJson(step, {});
             copy.observer_id = observerId;
+            if (observerTaskId !== null && observerTaskId !== undefined) copy.observer_task_id = observerTaskId;
             run.step_performance.push(copy);
             if (run.step_performance.length > MAX_STEP_RECORDS) {
                 run.step_performance = run.step_performance.slice(-MAX_STEP_RECORDS);
@@ -3889,7 +4241,8 @@ class StatusProPlugin(WAN2GPPlugin):
             lastStepElapsed: null,
             lastStepAt: null,
             stepSamples: [],
-            stepSeconds: null
+            stepSeconds: null,
+            recovered: false
         }]));
     }
 
@@ -4074,15 +4427,16 @@ class StatusProPlugin(WAN2GPPlugin):
                 preloaded: true
             };
         }
-        const encode = state.records && state.records.encode;
-        if (encode && encode.unreported && encode.state === "complete") {
-            stages["encode:unreported"] = {
-                label: encode.label,
+        ["prepare", "input", "encode", "denoise", "decode", "post", "save"].forEach(stageId => {
+            const record = state.records && state.records[stageId];
+            if (!record || !record.unreported || record.state !== "complete") return;
+            stages[`${stageId}:unreported`] = {
+                label: record.rawName || record.label,
                 status: "unreported",
-                stage: "encode",
+                stage: stageId,
                 unreported: true
             };
-        }
+        });
         state.phaseOrder.forEach(id => {
             const record = state.phases[id];
             if (!record || record.state === "pending" || !Number.isFinite(record.elapsed)) return;
@@ -4130,6 +4484,7 @@ class StatusProPlugin(WAN2GPPlugin):
         record.lastStepAt = null;
         record.stepSamples = [];
         record.stepSeconds = null;
+        record.recovered = false;
     }
 
     function resetDownstreamStagesForNextDenoisePhase(state) {
@@ -4305,14 +4660,323 @@ class StatusProPlugin(WAN2GPPlugin):
         return repaired;
     }
 
+    function normalizeLatePostprocessingModel(settings) {
+        if (!settings || typeof settings !== "object") return false;
+        const mode = String(settings.mode || "").trim().toLowerCase();
+        if (!["edit_postprocessing", "edit_remux", "edit_audio"].includes(mode)) return false;
+
+        const spatial = String(settings.spatial_upsampling || "").trim().toLowerCase();
+        const variants = {
+            ltx23: {modelType: "ltx2_22B", modelName: "LTX-2 2.3 Pixel Spatial Upscaler"},
+            ltx25: {modelType: "ltx2_25_22B_distilled", modelName: "LTX-2 2.5 Pixel Spatial Upscaler"}
+        };
+        const variantKey = mode === "edit_postprocessing"
+            ? Object.keys(variants).find(method => spatial.startsWith(method))
+            : null;
+        const variant = variantKey ? variants[variantKey] : null;
+        const previousModelType = String(settings.model_type || settings.base_model_type || "");
+        const previousModelName = String(settings.model_name || "");
+        const hadPreviousModelIdentity = Boolean(
+            previousModelType || settings.model_filename || previousModelName || settings.model_family || settings.component_models
+        );
+
+        [
+            "model_type", "base_model_type", "model_filename", "config", "model_name", "model_family",
+            "activated_loras", "loras_multipliers"
+        ].forEach(key => {
+            delete settings[key];
+        });
+        if (variant) {
+            settings.model_type = variant.modelType;
+            settings.model_name = variant.modelName;
+            settings.model_family = "LTX-2";
+            settings.num_inference_steps = 8;
+            if (previousModelType !== variant.modelType) {
+                delete settings.component_models;
+                delete settings.attention_mode;
+                delete settings.override_attention;
+                delete settings.attention_sparsity;
+            }
+        } else {
+            delete settings.component_models;
+            delete settings.attention_mode;
+            delete settings.override_attention;
+            delete settings.attention_sparsity;
+        }
+        const alreadyMatched = Boolean(
+            variant && previousModelType === variant.modelType && (!previousModelName || previousModelName === variant.modelName)
+        );
+        return hadPreviousModelIdentity && !alreadyMatched;
+    }
+
+    function fallbackPostprocessingLabel(value, kind) {
+        const text = String(value || "").trim();
+        const lowered = text.toLowerCase();
+        const methods = kind === "temporal_upsampling"
+            ? {rife: "RIFE"}
+            : {
+                flashvsr2pass: "FlashVSR Two Pass",
+                flashvsr: "FlashVSR",
+                seedvr2: "SeedVR2",
+                lanczos: "Lanczos",
+                ltx25: "LTX 2.5 Pixel Spatial Upscaler",
+                ltx23: "LTX 2.3 Pixel Spatial Upscaler",
+                coz: "Chain of Zoom"
+            };
+        const method = Object.keys(methods).sort((left, right) => right.length - left.length)
+            .find(candidate => lowered.startsWith(candidate));
+        if (!method) return text;
+        const scale = optionalNumber(lowered.slice(method.length));
+        return Number.isFinite(scale) ? `${methods[method]} x${scale}` : methods[method];
+    }
+
+    function normalizePostprocessingMetadata(settings) {
+        if (!settings || typeof settings !== "object") return null;
+        const source = settings.postprocessing && typeof settings.postprocessing === "object" && !Array.isArray(settings.postprocessing)
+            ? settings.postprocessing
+            : null;
+        let operations = source && Array.isArray(source.operations)
+            ? source.operations.filter(operation => operation && typeof operation === "object" && !Array.isArray(operation)).map(operation => {
+                const normalized = {
+                    kind: String(operation.kind || "").slice(0, 80),
+                    label: String(operation.label || "").slice(0, 500)
+                };
+                if (operation.value !== null && operation.value !== undefined) normalized.value = String(operation.value).slice(0, 300);
+                if (operation.processor) normalized.processor = String(operation.processor).slice(0, 300);
+                if (operation.method) normalized.method = String(operation.method).slice(0, 200);
+                for (const key of ["scale", "intensity", "saturation", "steps"]) {
+                    const value = optionalNumber(operation[key]);
+                    if (Number.isFinite(value)) normalized[key] = value;
+                }
+                if (operation.model && typeof operation.model === "object" && !Array.isArray(operation.model)) {
+                    normalized.model = {
+                        model_type: String(operation.model.model_type || "").slice(0, 300),
+                        model_name: String(operation.model.model_name || "").slice(0, 500)
+                    };
+                    if (operation.model.component_models && typeof operation.model.component_models === "object" && !Array.isArray(operation.model.component_models)) {
+                        const components = {};
+                        Object.entries(operation.model.component_models).slice(0, 10).forEach(([stage, values]) => {
+                            const names = (Array.isArray(values) ? values : [values])
+                                .slice(0, 20)
+                                .map(value => String(value || "").slice(0, 500))
+                                .filter(Boolean);
+                            if (names.length) components[String(stage).slice(0, 80)] = names;
+                        });
+                        if (Object.keys(components).length) normalized.model.component_models = components;
+                    }
+                    if (!normalized.model.model_type && !normalized.model.model_name) delete normalized.model;
+                }
+                return normalized;
+            }).filter(operation => operation.kind && operation.label)
+            : [];
+        if (!operations.length) {
+            const temporal = String(settings.temporal_upsampling || "").trim();
+            if (temporal) operations.push({
+                kind: "temporal_upsampling",
+                label: fallbackPostprocessingLabel(temporal, "temporal_upsampling"),
+                value: temporal
+            });
+            const spatial = String(settings.spatial_upsampling || "").trim();
+            if (spatial) {
+                const operation = {
+                    kind: "spatial_upsampling",
+                    label: fallbackPostprocessingLabel(spatial, "spatial_upsampling"),
+                    value: spatial
+                };
+                const loweredSpatial = spatial.toLowerCase();
+                if (loweredSpatial.startsWith("ltx25")) operation.model = {
+                    model_type: "ltx2_25_22B_distilled",
+                    model_name: "LTX-2 2.5 Pixel Spatial Upscaler"
+                };
+                else if (loweredSpatial.startsWith("ltx23")) operation.model = {
+                    model_type: "ltx2_22B",
+                    model_name: "LTX-2 2.3 Pixel Spatial Upscaler"
+                };
+                if (operation.model) operation.steps = 8;
+                operations.push(operation);
+            }
+            const intensity = optionalNumber(settings.film_grain_intensity);
+            if (intensity > 0) {
+                const saturation = optionalNumber(settings.film_grain_saturation);
+                const operation = {
+                    kind: "film_grain",
+                    label: `Film grain (intensity ${intensity}${Number.isFinite(saturation) ? `, saturation ${saturation}` : ""})`,
+                    intensity
+                };
+                if (Number.isFinite(saturation)) operation.saturation = saturation;
+                operations.push(operation);
+            }
+        }
+        if (!operations.length) {
+            delete settings.postprocessing;
+            return null;
+        }
+        const mode = String(settings.mode || "").trim().toLowerCase();
+        const application = mode
+            ? (mode === "edit_postprocessing" ? "late" : "inline")
+            : (source && ["late", "inline"].includes(source.application) ? source.application : "inline");
+        const metadata = {
+            application,
+            summary: operations.map(operation => operation.label).join(" · ").slice(0, 1500),
+            operations
+        };
+        settings.postprocessing = metadata;
+        return metadata;
+    }
+
+    function componentModelsMatchModelType(componentModels, modelType) {
+        if (!componentModels || typeof componentModels !== "object" || Array.isArray(componentModels)) return false;
+        const names = Object.values(componentModels)
+            .flatMap(values => Array.isArray(values) ? values : [values])
+            .map(value => String(value || "").trim())
+            .filter(Boolean);
+        if (!names.length) return false;
+        const normalizedModelType = String(modelType || "").trim().toLowerCase();
+        if (normalizedModelType.startsWith("ltx2")) {
+            if (names.some(name => /(?:minimax|qwen|hunyuan|wan2(?:\.|_)?)/i.test(name))) return false;
+            return names.some(name => /(?:ltx|gemma)/i.test(name));
+        }
+        return true;
+    }
+
+    function ltxComponentFallbacks(modelType) {
+        const normalized = String(modelType || "").trim().toLowerCase();
+        if (normalized === "ltx2_25_22b_distilled") return {
+            prepare: ["LTX-2.5 22B distilled transformer"],
+            input: ["LTX-2.5 video VAE", "LTX-2.5 audio VAE"],
+            encode: ["Gemma 4 12B LTX v1 text encoder"],
+            decode: ["LTX-2.5 video VAE", "LTX-2.5 audio VAE"]
+        };
+        if (normalized === "ltx2_22b") return {
+            prepare: ["LTX-2.3 22B transformer"],
+            input: ["LTX-2.3 video VAE", "LTX-2.3 audio VAE"],
+            encode: ["Gemma 3 12B LTX text encoder"],
+            decode: ["LTX-2.3 video VAE", "LTX-2.3 audio VAE"]
+        };
+        return null;
+    }
+
+    function completedPostprocessingComponents(model) {
+        if (!model || typeof model !== "object") return null;
+        const modelType = String(model.model_type || "");
+        const exact = componentModelsMatchModelType(model.component_models, modelType)
+            ? cloneJson(model.component_models, {})
+            : {};
+        const fallbacks = ltxComponentFallbacks(modelType);
+        if (!fallbacks) return Object.keys(exact).length ? exact : null;
+        Object.entries(fallbacks).forEach(([stage, values]) => {
+            if (!exact[stage] || !(Array.isArray(exact[stage]) ? exact[stage] : [exact[stage]]).filter(Boolean).length) {
+                exact[stage] = values.slice();
+            }
+        });
+        return exact;
+    }
+
+    function normalizeRunSettings(settings) {
+        if (!settings || typeof settings !== "object") return false;
+        const repairedModel = normalizeLatePostprocessingModel(settings);
+        const metadata = normalizePostprocessingMetadata(settings);
+        if (!metadata || metadata.application !== "late") return repairedModel;
+
+        const modelType = String(settings.model_type || "").trim();
+        if (!modelType.toLowerCase().startsWith("ltx2")) return repairedModel;
+        const backingOperation = metadata.operations.find(operation =>
+            operation && operation.model && String(operation.model.model_type || "") === modelType
+        );
+        const backingComponents = backingOperation && completedPostprocessingComponents(backingOperation.model);
+        if (componentModelsMatchModelType(backingComponents, modelType)) {
+            settings.component_models = cloneJson(backingComponents, {});
+            backingOperation.model.component_models = cloneJson(backingComponents, {});
+        } else if (!componentModelsMatchModelType(settings.component_models, modelType)) {
+            delete settings.component_models;
+        }
+        return repairedModel;
+    }
+
+    function postprocessingMetadata(run) {
+        return normalizePostprocessingMetadata(run && run.settings);
+    }
+
+    function postprocessingSummary(run) {
+        const metadata = postprocessingMetadata(run);
+        return metadata ? metadata.summary : "";
+    }
+
+    function postprocessingDetailText(run) {
+        const metadata = postprocessingMetadata(run);
+        return metadata ? metadata.operations.map(operation => operation.label).join("\n") : "";
+    }
+
+    function repairLatePostprocessingPerformance(run) {
+        const metadata = postprocessingMetadata(run);
+        if (!metadata || metadata.application !== "late") return false;
+        const hasLtx = metadata.operations.some(operation =>
+            operation && operation.model && String(operation.model.model_type || "").toLowerCase().startsWith("ltx2")
+        );
+        if (!hasLtx || !Array.isArray(run.step_performance) || !run.step_performance.length) return false;
+        const trusted = run.step_performance.filter(step =>
+            /(?:distilled refinement|upsampl)/i.test(String(step && step.label || ""))
+        );
+        if (trusted.length === run.step_performance.length) return false;
+        run.step_performance = trusted;
+        run.step_summary = null;
+        delete run.step_performance_source_truncated;
+        return true;
+    }
+
+    function repairCrossTaskPerformance(run) {
+        if (!run || !Array.isArray(run.step_performance) || !run.step_performance.length) return false;
+        const runTaskId = run.queue_task_id;
+        const runStartedAt = optionalNumber(run.started_at);
+        const trusted = run.step_performance.filter(step => {
+            if (!step || typeof step !== "object") return false;
+            const observerTaskId = step.observer_task_id;
+            if (
+                observerTaskId !== null && observerTaskId !== undefined &&
+                runTaskId !== null && runTaskId !== undefined
+            ) return String(observerTaskId) === String(runTaskId);
+
+            // Status Pro observer IDs use Python time_ns(). Older records did not
+            // retain task_id, so reject only streams that unmistakably predate the
+            // browser-observed run. The one-minute margin avoids clock/poll jitter.
+            const observerId = String(step.observer_id || "");
+            if (Number.isFinite(runStartedAt) && /^\d{16,}$/.test(observerId)) {
+                const observerStartedAt = Number(observerId.slice(0, 13));
+                if (Number.isFinite(observerStartedAt) && observerStartedAt < runStartedAt - 60000) return false;
+            }
+            return true;
+        });
+        if (trusted.length === run.step_performance.length) return false;
+        run.step_performance = trusted;
+        run.step_summary = null;
+        return true;
+    }
+
+    function repairImpossibleGenerationTime(run) {
+        if (!run || !run.settings || typeof run.settings !== "object") return false;
+        const generationTime = optionalNumber(setting(run.settings, "generation_time"));
+        const wallTime = optionalNumber(run.duration_seconds);
+        if (!Number.isFinite(generationTime)) return false;
+        const tolerance = Number.isFinite(wallTime) ? Math.max(30, wallTime * 0.1) : null;
+        if (generationTime < 0 || (Number.isFinite(tolerance) && generationTime > wallTime + tolerance)) {
+            delete run.settings.generation_time;
+            return true;
+        }
+        return false;
+    }
+
     function normalizeRunMedia(run) {
         const declaredMediaType = String(run && run.media_type || "").toLowerCase();
         const declaredFrameCount = optionalNumber(run && run.frame_count);
         const declaredOutputCount = optionalNumber(run && run.output_count);
         run.settings = run.settings && typeof run.settings === "object" ? run.settings : {};
+        if (normalizeRunSettings(run.settings)) run.imported_model_summary = "";
         run.step_performance = Array.isArray(run.step_performance) ? run.step_performance : [];
         run.resources = run.resources && typeof run.resources === "object" ? run.resources : null;
         run.step_summary = run.step_summary && typeof run.step_summary === "object" ? run.step_summary : null;
+        repairImpossibleGenerationTime(run);
+        repairCrossTaskPerformance(run);
+        repairLatePostprocessingPerformance(run);
         const repairedStepTotals = repairInheritedPassTotals(run);
         if (run.step_performance.length && (repairedStepTotals || !run.step_summary || !Array.isArray(run.step_summary.passes))) {
             finalizePerformance(run);
@@ -4368,6 +5032,7 @@ class StatusProPlugin(WAN2GPPlugin):
         const observedNow = Number(telemetry && telemetry.server_time) * 1000 || Date.now();
         const now = Number.isFinite(options.startedAt) ? options.startedAt : observedNow;
         const settings = cloneJson(task && task.settings, {});
+        normalizeRunSettings(settings);
         const observedWindow = windowDetails(telemetry);
         const window = {
             number: Number.isFinite(options.windowNo) ? options.windowNo : observedWindow.number,
@@ -4408,10 +5073,12 @@ class StatusProPlugin(WAN2GPPlugin):
 
     function updateActiveRun(namespace, task, telemetry) {
         if (!namespace.activeRun || !task) return;
-        namespace.activeRun.settings = {
+        const settings = {
             ...namespace.activeRun.settings,
             ...cloneJson(task.settings, {})
         };
+        normalizeRunSettings(settings);
+        namespace.activeRun.settings = settings;
         const windowPrompt = windowPromptFor(task, namespace.activeRun.window_no);
         if (windowPrompt) {
             namespace.activeRun.window_prompt = windowPrompt;
@@ -4429,13 +5096,14 @@ class StatusProPlugin(WAN2GPPlugin):
     function finishRun(namespace, status, completedAt, telemetry, outputEnd) {
         const run = namespace.activeRun;
         if (!run) return;
+        observePerformanceTelemetry(run, telemetry || namespace.runTelemetry);
+        recoverMissedPerformanceStages(namespace);
         finishStage(namespace.state, namespace.state.currentId);
         finishPhase(namespace.state);
         const ended = Number.isFinite(completedAt) ? completedAt : Date.now();
         run.completed_at = ended;
         run.duration_seconds = Math.max(0, Math.round((ended - run.started_at) / 100) / 10);
         run.stages = stageDurations(namespace.state);
-        observePerformanceTelemetry(run, telemetry || namespace.runTelemetry);
         finalizePerformance(run);
         const outputRecords = currentOutputRecords(telemetry || namespace.runTelemetry);
         const outputStart = Math.min(run.output_baseline || 0, outputRecords.length);
@@ -4739,6 +5407,171 @@ class StatusProPlugin(WAN2GPPlugin):
         };
     }
 
+    function performanceStageId(label) {
+        const text = String(label || "");
+        return /(?:upsampl|spatial refin|distilled refinement|ltx\s*2)/i.test(text) ? "post" : "denoise";
+    }
+
+    function recoveredPerformanceGroups(run) {
+        const groups = new Map();
+        (Array.isArray(run && run.step_performance) ? run.step_performance : []).forEach(step => {
+            if (!step || typeof step !== "object") return;
+            const observerId = String(step.observer_id || "observer");
+            const passNo = optionalNumber(step.pass_no);
+            const phaseNo = optionalNumber(step.phase);
+            const identity = Number.isFinite(passNo) && passNo > 0
+                ? `pass-${Math.floor(passNo)}`
+                : `phase-${Number.isFinite(phaseNo) ? Math.floor(phaseNo) : 0}`;
+            const key = `${observerId}:${identity}`;
+            let group = groups.get(key);
+            if (!group) {
+                group = {
+                    key,
+                    observerId,
+                    identity,
+                    passNo: Number.isFinite(passNo) && passNo > 0 ? Math.floor(passNo) : null,
+                    phaseNo: Number.isFinite(phaseNo) ? Math.floor(phaseNo) : 0,
+                    label: "",
+                    stage: "denoise",
+                    duration: 0,
+                    durations: [],
+                    observedSteps: 0,
+                    configuredSteps: null,
+                    maxStep: 0,
+                    firstCompletedAt: null,
+                    lastCompletedAt: null
+                };
+                groups.set(key, group);
+            }
+            if (step.label) group.label = String(step.label).slice(0, 300);
+            group.stage = performanceStageId(group.label);
+            const duration = optionalNumber(step.duration_seconds);
+            if (Number.isFinite(duration) && duration >= 0 && duration <= 86400) {
+                group.duration += duration;
+                group.durations.push(duration);
+            }
+            group.observedSteps += 1;
+            const configured = optionalNumber(step.total_steps);
+            if (Number.isFinite(configured) && configured > 0) {
+                group.configuredSteps = Math.max(group.configuredSteps || 0, Math.floor(configured));
+            }
+            const stepNo = optionalNumber(step.step);
+            if (Number.isFinite(stepNo) && stepNo > 0) group.maxStep = Math.max(group.maxStep, Math.floor(stepNo));
+            const completedAt = optionalNumber(step.completed_at);
+            if (Number.isFinite(completedAt)) {
+                const completedMs = completedAt * 1000;
+                group.firstCompletedAt = Number.isFinite(group.firstCompletedAt)
+                    ? Math.min(group.firstCompletedAt, completedMs)
+                    : completedMs;
+                group.lastCompletedAt = Number.isFinite(group.lastCompletedAt)
+                    ? Math.max(group.lastCompletedAt, completedMs)
+                    : completedMs;
+            }
+        });
+        return Array.from(groups.values())
+            .map(group => ({
+                ...group,
+                complete: Number.isFinite(group.configuredSteps) && group.maxStep >= group.configuredSteps,
+                label: group.label || (group.stage === "post"
+                    ? "Post-processing"
+                    : (Number.isFinite(group.passNo)
+                        ? `Denoising pass ${group.passNo}`
+                        : (group.phaseNo > 0 ? `Denoising phase ${group.phaseNo + 1}` : "Denoising")))
+            }))
+            .sort((left, right) => (left.firstCompletedAt || 0) - (right.firstCompletedAt || 0));
+    }
+
+    function recoverMissedPerformanceStages(namespace, snapshot = null) {
+        const run = namespace && namespace.activeRun;
+        const state = namespace && namespace.state;
+        if (!run || !state || !state.records) return false;
+        const groups = recoveredPerformanceGroups(run);
+        if (!groups.length) return false;
+        const currentStage = snapshot && snapshot.id;
+        const currentRank = STAGE_DEFS.findIndex(def => def.id === currentStage);
+        let recovered = false;
+
+        for (const stageId of ["denoise", "post"]) {
+            const record = state.records[stageId];
+            if (!record || record.state !== "pending") continue;
+            const stageRank = STAGE_DEFS.findIndex(def => def.id === stageId);
+            const stageWasPassed = currentRank >= 0 && stageRank >= 0 && currentRank > stageRank;
+            const stageIsCurrent = currentStage === stageId;
+            const eligible = groups.filter(group =>
+                group.stage === stageId && (group.complete || stageWasPassed || stageIsCurrent)
+            );
+            if (!eligible.length) continue;
+
+            const elapsed = eligible.reduce((total, group) => total + group.duration, 0);
+            const configuredSteps = eligible.reduce(
+                (total, group) => total + (Number.isFinite(group.configuredSteps) ? group.configuredSteps : 0),
+                0
+            );
+            const observedSteps = eligible.reduce(
+                (total, group) => total + (Number.isFinite(group.maxStep) ? group.maxStep : group.observedSteps),
+                0
+            );
+            const durations = eligible.flatMap(group => group.durations).filter(value => value > 0).sort((a, b) => a - b);
+            const middle = Math.floor(durations.length / 2);
+
+            record.visible = true;
+            record.state = "complete";
+            record.preloaded = false;
+            record.unreported = false;
+            record.recovered = true;
+            record.rawName = stageId === "denoise" ? "Denoising (recovered)" : "Post-processing (recovered)";
+            record.rawMessage = `Recovered from ${eligible.reduce((total, group) => total + group.observedSteps, 0)} retained WanGP callback observations after browser activity resumed.`;
+            record.startedAt = null;
+            record.elapsed = elapsed;
+            record.elapsedBase = elapsed;
+            record.reportedElapsed = elapsed;
+            record.reportedAt = Date.now();
+            record.progress = (stageWasPassed || eligible.every(group => group.complete)) ? 100 : null;
+            record.eta = record.progress === 100 ? 0 : null;
+            record.stepCurrent = observedSteps || null;
+            record.stepTotal = configuredSteps || null;
+            record.lastStepCurrent = record.stepCurrent;
+            record.lastStepElapsed = elapsed;
+            record.lastStepAt = null;
+            record.stepSamples = durations.slice(-6);
+            record.stepSeconds = durations.length
+                ? (durations.length % 2 ? durations[middle] : (durations[middle - 1] + durations[middle]) / 2)
+                : null;
+
+            eligible.forEach(group => {
+                if (!(group.complete || stageWasPassed)) return;
+                const safeObserver = group.observerId.replace(/[^a-z0-9_-]+/gi, "-").slice(0, 80);
+                const phaseId = `${stageId}:recovered-${safeObserver}-${group.identity}`;
+                if (state.phases[phaseId]) return;
+                state.phases[phaseId] = {
+                    id: phaseId,
+                    label: group.label,
+                    stage: stageId,
+                    startedAt: Number.isFinite(group.firstCompletedAt)
+                        ? group.firstCompletedAt - group.duration * 1000
+                        : null,
+                    elapsed: group.duration,
+                    state: "complete",
+                    recovered: true
+                };
+                state.phaseOrder.push(phaseId);
+            });
+            recovered = true;
+        }
+
+        if (recovered && state.records.denoise.recovered) {
+            markStageUnreported(
+                state,
+                "prepare",
+                "Prepare completed while backgrounded",
+                "The browser did not observe Prepare while the WanGP window was minimized; its duration is unavailable."
+            );
+            markEncodeUnreported(state);
+        }
+        if (recovered) state.inactiveSince = 0;
+        return recovered;
+    }
+
     function finishStage(state, id) {
         if (!id) return;
         const record = state.records[id];
@@ -4773,21 +5606,32 @@ class StatusProPlugin(WAN2GPPlugin):
         record.eta = 0;
     }
 
-    function markEncodeUnreported(state) {
-        const record = state.records.encode;
+    function markStageUnreported(state, id, rawName, rawMessage) {
+        const record = state.records[id];
         if (!record || record.state !== "pending") return;
         record.visible = true;
         record.state = "complete";
         record.preloaded = false;
         record.unreported = true;
-        record.rawName = "Encode status not reported";
-        record.rawMessage = "Wan2GP did not expose a separately measurable Encode phase for this run. Any required prompt, reference, or input conditioning completed before generation began.";
+        record.recovered = true;
+        record.rawName = rawName;
+        record.rawMessage = rawMessage;
         record.startedAt = null;
         record.elapsed = null;
+        record.elapsedBase = 0;
         record.reportedElapsed = null;
         record.reportedAt = null;
         record.progress = 100;
         record.eta = 0;
+    }
+
+    function markEncodeUnreported(state) {
+        markStageUnreported(
+            state,
+            "encode",
+            "Encode status not reported",
+            "Wan2GP did not expose a separately measurable Encode phase for this run. Any required prompt, reference, or input conditioning completed before generation began."
+        );
     }
 
     function updateEta(record) {
@@ -4882,7 +5726,7 @@ class StatusProPlugin(WAN2GPPlugin):
     function applySnapshot(namespace, snapshot) {
         const state = namespace.state;
         const now = Date.now();
-        if (state.inactiveSince && now - state.inactiveSince > RESET_AFTER_MS) {
+        if (!namespace.activeRun && state.inactiveSince && now - state.inactiveSince > RESET_AFTER_MS) {
             finishStage(state, state.currentId);
             resetJob(namespace);
         }
@@ -4900,7 +5744,8 @@ class StatusProPlugin(WAN2GPPlugin):
             finishStage(activeState, activeState.currentId);
             activeState.currentId = snapshot.id;
             const next = activeState.records[snapshot.id];
-            const elapsedBase = snapshot.id === "input" && next.state === "complete" && Number.isFinite(next.elapsed)
+            const recoveredBaseline = next.recovered && next.state === "complete" && Number.isFinite(next.elapsed);
+            const elapsedBase = (recoveredBaseline || (snapshot.id === "input" && next.state === "complete" && Number.isFinite(next.elapsed)))
                 ? next.elapsed
                 : 0;
             next.state = snapshot.aborting ? "aborting" : "current";
@@ -4925,6 +5770,7 @@ class StatusProPlugin(WAN2GPPlugin):
             next.lastStepAt = null;
             next.stepSamples = [];
             next.stepSeconds = null;
+            next.recovered = Boolean(recoveredBaseline);
             if (!activeState.selectionIsManual || !activeState.selectedId) activeState.selectedId = snapshot.id;
         }
 
@@ -5088,7 +5934,23 @@ class StatusProPlugin(WAN2GPPlugin):
             };
         }
         const settings = namespace.activeRun && namespace.activeRun.settings;
-        const components = settings && settings.component_models;
+        let components = settings && settings.component_models;
+        const activityText = `${record && record.rawName || ""} ${record && record.rawMessage || ""}`;
+        if (settings && record && ["prepare", "input", "encode", "decode"].includes(record.id)) {
+            const metadata = normalizePostprocessingMetadata(settings);
+            const isPostprocessingStage = metadata && (
+                metadata.application === "late" || /upsampl|spatial refin/i.test(activityText)
+            );
+            const backingOperation = isPostprocessingStage && metadata.operations.find(operation =>
+                operation && operation.kind === "spatial_upsampling" && operation.model
+            );
+            if (backingOperation) {
+                // Never fall through to the generation model during an LTX stage.
+                // Exact WanGP filenames win; role-accurate LTX labels fill any
+                // components the model definition does not expose.
+                components = completedPostprocessingComponents(backingOperation.model);
+            }
+        }
         if (record && record.id === "input" &&
             !/(?:vae|latent|auto.?encod|encod|decod)/i.test(`${record.rawName || ""} ${record.rawMessage || ""}`)) {
             return null;
@@ -5300,8 +6162,15 @@ class StatusProPlugin(WAN2GPPlugin):
 
     function runDescriptor(run) {
         const importedSummary = String(run && run.imported_model_summary || "").trim();
-        if (importedSummary) return importedSummary.slice(0, 500);
         const settings = run.settings || {};
+        const postprocessing = postprocessingMetadata(run);
+        if (importedSummary) {
+            const imported = importedSummary.slice(0, 500);
+            if (postprocessing && postprocessing.application === "inline" && !/\s·\sPost:/i.test(imported)) {
+                return `${imported} · Post: ${postprocessing.summary}`.slice(0, 1000);
+            }
+            return imported;
+        }
         const modelType = setting(settings, "model_type", "base_model_type");
         const fallback = fallbackModelParts(modelType);
         let platform = settingText(setting(settings, "model_family"));
@@ -5326,7 +6195,15 @@ class StatusProPlugin(WAN2GPPlugin):
         const resolution = settingText(setting(settings, "resolution"));
         const parts = [platform, variant, mediaLabel, resolution === "—" ? "" : resolution]
             .filter((value, index, values) => value && values.indexOf(value) === index);
-        return parts.join(" - ") || runModel(run);
+        if (postprocessing && postprocessing.application === "late") {
+            return [postprocessing.summary, mediaLabel, resolution === "—" ? "" : resolution]
+                .filter((value, index, values) => value && values.indexOf(value) === index)
+                .join(" - ");
+        }
+        const descriptor = parts.join(" - ") || runModel(run);
+        return postprocessing && postprocessing.application === "inline"
+            ? `${descriptor} · Post: ${postprocessing.summary}`
+            : descriptor;
     }
 
     function addRunField(container, label, value, displayValue = null, fullValue = null) {
@@ -5699,7 +6576,19 @@ class StatusProPlugin(WAN2GPPlugin):
             addRunField(fields, "Media type", run.media_type);
             addRunField(fields, "Frames", run.frame_count);
             addRunField(fields, "Output count", run.output_count);
-            addRunField(fields, "Model", runModelLabel(run));
+            const modelLabel = runModelLabel(run);
+            if (modelLabel !== "—") addRunField(fields, "Model", modelLabel);
+            const postprocessing = postprocessingMetadata(run);
+            if (postprocessing) {
+                addRunField(
+                    fields,
+                    "Processing context",
+                    postprocessing.application === "late"
+                        ? "Selected gallery file (separate task)"
+                        : "Generation output (same task)"
+                );
+                addRunField(fields, "Post-processing", postprocessingDetailText(run));
+            }
             addRunField(fields, "Resolution", setting(settings, "resolution"));
             addRunField(fields, "Steps", setting(settings, "num_inference_steps"));
             addRunField(fields, "FPS", setting(settings, "force_fps", "fps"));
@@ -6003,6 +6892,19 @@ class StatusProPlugin(WAN2GPPlugin):
             pass_summaries: cloneJson(run.step_summary && run.step_summary.passes, [])
         };
         if (fieldId === "model_summary") return runDescriptor(run);
+        if (fieldId === "postprocessing") {
+            const metadata = cloneJson(postprocessingMetadata(run), null);
+            const includeExactModels = selectedFields.has("checkpoint") || selectedFields.has("settings");
+            if (metadata && !includeExactModels) {
+                (metadata.operations || []).forEach(operation => {
+                    if (!operation || !operation.model) return;
+                    delete operation.model.model_type;
+                    delete operation.model.component_models;
+                    if (!operation.model.model_name) delete operation.model;
+                });
+            }
+            return metadata;
+        }
         if (fieldId === "model_name") return runModelLabel(run);
         if (fieldId === "checkpoint") return setting(settings, "model_filename", "model_type", "base_model_type");
         if (fieldId === "resolution") return setting(settings, "resolution");
@@ -6053,7 +6955,9 @@ class StatusProPlugin(WAN2GPPlugin):
     }
 
     function csvCell(value) {
-        const string = value === null || value === undefined ? "" : String(value);
+        const string = value === null || value === undefined
+            ? ""
+            : (typeof value === "object" ? JSON.stringify(value) : String(value));
         return `"${string.replace(/"/g, '""')}"`;
     }
 
@@ -6079,7 +6983,10 @@ class StatusProPlugin(WAN2GPPlugin):
     }
 
     function markdownCell(value) {
-        return String(value === null || value === undefined ? "" : value).replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+        const string = value === null || value === undefined
+            ? ""
+            : (typeof value === "object" ? JSON.stringify(value) : String(value));
+        return string.replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
     }
 
     function exportMarkdown(records, selectedFields, metadata) {
@@ -6134,7 +7041,7 @@ class StatusProPlugin(WAN2GPPlugin):
             downloadText(`status-pro-${stamp}.json`, "application/json;charset=utf-8", JSON.stringify({
                 exported_at: exportedAt.toISOString(),
                 exported_at_local: localIsoTimestamp(exportedAt),
-                version: "1.0.4",
+                version: "1.0.5",
                 ...metadata,
                 runs: records
             }, null, 2));
@@ -6188,6 +7095,7 @@ class StatusProPlugin(WAN2GPPlugin):
                 ? cloneJson(source.settings, {})
                 : {};
             setImportedSetting(settings, "generation_time", source.generation_time);
+            setImportedSetting(settings, "postprocessing", source.postprocessing);
             setImportedSetting(settings, "model_name", source.model_name);
             setImportedSetting(settings, "model_filename", source.checkpoint);
             setImportedSetting(settings, "resolution", source.resolution);
@@ -7141,6 +8049,7 @@ class StatusProPlugin(WAN2GPPlugin):
         }
         if (snapshot) {
             observeRunOutcome(namespace, snapshot.rawName, snapshot.rawMessage);
+            recoverMissedPerformanceStages(namespace, snapshot);
             applySnapshot(namespace, snapshot);
             setActive(namespace, true);
             render(namespace);
@@ -7148,11 +8057,11 @@ class StatusProPlugin(WAN2GPPlugin):
         }
         const now = Date.now();
         if (!namespace.state.inactiveSince) namespace.state.inactiveSince = now;
-        if (now - namespace.state.inactiveSince >= RESET_AFTER_MS) {
+        if (!namespace.activeRun && now - namespace.state.inactiveSince >= RESET_AFTER_MS) {
             finishStage(namespace.state, namespace.state.currentId);
         }
         setActive(namespace, true);
-        if (namespace.activeRun && now - namespace.state.inactiveSince < RESET_AFTER_MS) render(namespace);
+        if (namespace.activeRun) render(namespace);
         else renderIdle(namespace);
     }
 
@@ -7177,6 +8086,10 @@ class StatusProPlugin(WAN2GPPlugin):
         const previous = window[NAMESPACE];
         if (previous && previous.timer) window.clearInterval(previous.timer);
         if (previous && previous.exportResizeHandler) window.removeEventListener("resize", previous.exportResizeHandler);
+        if (previous && previous.resumeHandler) {
+            document.removeEventListener("visibilitychange", previous.resumeHandler);
+            window.removeEventListener("focus", previous.resumeHandler);
+        }
         if (previous && previous.historyExpanded) closeHistoryModal(previous);
         const customExportPresets = loadCustomExportPresets();
         const savedExportSettings = loadExportSettings();
@@ -7233,6 +8146,7 @@ class StatusProPlugin(WAN2GPPlugin):
             settingsDraft: null,
             exportDrag: null,
             exportResizeHandler: null,
+            resumeHandler: null,
             collapsed: loadCollapsedPreference(),
             timer: null
         };
@@ -7669,6 +8583,15 @@ class StatusProPlugin(WAN2GPPlugin):
         applyCollapsed(namespace);
         setActive(namespace, true);
         renderIdle(namespace);
+        namespace.resumeHandler = () => {
+            if (document.hidden) return;
+            tick(namespace);
+            // Gradio's browser-driven Timer may publish its first refreshed
+            // backend bridge value shortly after the page becomes visible.
+            window.setTimeout(() => tick(namespace), 750);
+        };
+        document.addEventListener("visibilitychange", namespace.resumeHandler);
+        window.addEventListener("focus", namespace.resumeHandler);
         namespace.timer = window.setInterval(() => tick(namespace), TICK_MS);
         tick(namespace);
         console.info("[Status Pro] Progress timeline initialized");

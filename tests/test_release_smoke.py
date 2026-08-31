@@ -6,6 +6,7 @@ import pathlib
 import shutil
 import subprocess
 import tempfile
+import time
 import unittest
 
 
@@ -75,7 +76,7 @@ class ReleaseSmokeTests(unittest.TestCase):
             self.assertTrue((ROOT / document).is_file(), document)
         manifest = json.loads((ROOT / "plugin_info.json").read_text(encoding="utf-8"))
         version = manifest["version"]
-        self.assertEqual(version, "1.0.4")
+        self.assertEqual(version, "1.0.5")
         self.assertIn(f'self.version = "{version}"', source)
         self.assertIn(f'version: "{version}"', source)
         self.assertEqual(manifest["type"], "extension")
@@ -192,17 +193,30 @@ for (const field of api.EXPORT_FIELD_DEFS) {
             self.assertIn(requested_global, source)
 
         tree = ast.parse(source)
-        run_keys = next(
+        telemetry_constants = [
             node for node in tree.body
             if isinstance(node, ast.Assign)
-            and any(isinstance(target, ast.Name) and target.id == "RUN_SETTING_KEYS" for target in node.targets)
-        )
+            and any(
+                isinstance(target, ast.Name)
+                and target.id in {"RUN_SETTING_KEYS", "LTX_POSTPROCESSING_MODEL_TYPES", "LTX_POSTPROCESSING_STEPS"}
+                for target in node.targets
+            )
+        ]
         helpers = [
             node for node in tree.body
-            if isinstance(node, ast.FunctionDef) and node.name in {"_telemetry_value", "_task_telemetry"}
+            if isinstance(node, ast.FunctionDef)
+            and node.name in {
+                "_telemetry_value",
+                "_ltx_component_fallbacks",
+                "_complete_ltx_components",
+                "_normalize_late_postprocessing_settings",
+                "_fallback_postprocessing_label",
+                "_postprocessing_metadata",
+                "_task_telemetry",
+            }
         ]
         namespace = {}
-        module = ast.Module(body=[run_keys, *helpers], type_ignores=[])
+        module = ast.Module(body=[*telemetry_constants, *helpers], type_ignores=[])
         ast.fix_missing_locations(module)
         exec(compile(module, str(PLUGIN_PATH), "exec"), namespace)
         task_telemetry = namespace["_task_telemetry"]
@@ -254,6 +268,488 @@ for (const preset of ["performance", "reproducibility", "share-safe"]) {
   if (!api.EXPORT_PRESETS[preset].includes("attention_mode") || !api.EXPORT_PRESETS[preset].includes("attention_sparsity")) {
     throw new Error(`${preset} preset omits attention settings`);
   }
+}
+'''
+        result = subprocess.run(
+            [node, "-"],
+            input=javascript + "\n" + test_script,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_ltx_late_postprocessing_records_the_model_it_loads(self):
+        source = _source()
+        tree = ast.parse(source)
+        definitions = {
+            node.name: node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        constants = [
+            node for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name)
+                and target.id in {"RUN_SETTING_KEYS", "LTX_POSTPROCESSING_MODEL_TYPES", "LTX_POSTPROCESSING_STEPS"}
+                for target in node.targets
+            )
+        ]
+        helpers = [
+            definitions[name]
+            for name in (
+                "_telemetry_value",
+                "_ltx_component_fallbacks",
+                "_complete_ltx_components",
+                "_normalize_late_postprocessing_settings",
+                "_fallback_postprocessing_label",
+                "_postprocessing_metadata",
+                "_task_telemetry",
+            )
+        ]
+        namespace = {}
+        module = ast.Module(body=[*constants, *helpers], type_ignores=[])
+        ast.fix_missing_locations(module)
+        exec(compile(module, str(PLUGIN_PATH), "exec"), namespace)
+        task_telemetry = namespace["_task_telemetry"]
+
+        settings = task_telemetry(
+            {"params": {
+                "mode": "edit_postprocessing",
+                "model_type": "minimax_h3_ref2va_pruned_pdd",
+                "spatial_upsampling": "ltx252",
+                "temporal_upsampling": "rife2",
+                "film_grain_intensity": 0.2,
+                "film_grain_saturation": 0.5,
+                "attention_mode": "sage2",
+                "activated_loras": ["stale-h3-lora.safetensors"],
+            }},
+            get_model_name=lambda model_type: self.fail(f"unexpected display-name lookup for {model_type}"),
+            get_model_family=lambda model_type, for_ui=False: "ltx2",
+            families_infos={"ltx2": (None, "LTX-2")},
+            component_resolver=lambda values: {"prepare": [values["model_type"]]},
+        )["settings"]
+
+        self.assertEqual(settings["model_type"], "ltx2_25_22B_distilled")
+        self.assertEqual(settings["model_name"], "LTX-2 2.5 Pixel Spatial Upscaler")
+        self.assertEqual(settings["model_family"], "LTX-2")
+        self.assertEqual(settings["num_inference_steps"], 8)
+        self.assertEqual(settings["component_models"]["prepare"], ["ltx2_25_22B_distilled"])
+        self.assertEqual(settings["component_models"]["encode"], ["Gemma 4 12B LTX v1 text encoder"])
+        self.assertNotIn("base_model_type", settings)
+        self.assertNotIn("model_filename", settings)
+        self.assertNotIn("activated_loras", settings)
+        self.assertEqual(settings["postprocessing"]["application"], "late")
+        self.assertEqual(
+            [operation["kind"] for operation in settings["postprocessing"]["operations"]],
+            ["temporal_upsampling", "spatial_upsampling", "film_grain"],
+        )
+        self.assertIn("RIFE x2", settings["postprocessing"]["summary"])
+        self.assertIn("LTX 2.5 Pixel Spatial Upscaler x2", settings["postprocessing"]["summary"])
+        self.assertEqual(
+            settings["postprocessing"]["operations"][1]["model"]["model_type"],
+            "ltx2_25_22B_distilled",
+        )
+        self.assertEqual(
+            settings["postprocessing"]["operations"][1]["model"]["component_models"]["prepare"],
+            ["ltx2_25_22B_distilled"],
+        )
+        self.assertEqual(settings["postprocessing"]["operations"][1]["steps"], 8)
+
+        ltx23 = task_telemetry({"params": {
+            "mode": "edit_postprocessing",
+            "model_type": "minimax_h3",
+            "spatial_upsampling": "ltx232",
+        }})["settings"]
+        self.assertEqual(ltx23["model_type"], "ltx2_22B")
+        self.assertEqual(ltx23["model_name"], "LTX-2 2.3 Pixel Spatial Upscaler")
+        self.assertEqual(
+            ltx23["postprocessing"]["operations"][0]["model"]["component_models"]["encode"],
+            ["Gemma 3 12B LTX text encoder"],
+        )
+
+        model_free = task_telemetry(
+            {"params": {
+                "mode": "edit_postprocessing",
+                "model_type": "minimax_h3",
+                "spatial_upsampling": "lanczos2",
+                "attention_mode": "sage2",
+                "attention_sparsity": 1.25,
+                "model_name": "Stale MiniMax H3",
+                "model_family": "MiniMax H3",
+                "component_models": {"decode": ["MiniMax-H3-video_vae_fp16.safetensors"]},
+            }},
+            attention_mode="flash",
+        )["settings"]
+        self.assertNotIn("model_type", model_free)
+        self.assertNotIn("model_name", model_free)
+        self.assertNotIn("attention_mode", model_free)
+        self.assertNotIn("attention_sparsity", model_free)
+        self.assertNotIn("model_family", model_free)
+        self.assertNotIn("component_models", model_free)
+        self.assertEqual(model_free["postprocessing"]["summary"], "Lanczos x2")
+
+        inline = task_telemetry({"params": {
+            "mode": "text_to_video",
+            "model_type": "minimax_h3_ref2va_pruned_pdd",
+            "spatial_upsampling": "ltx252",
+            "temporal_upsampling": "rife2",
+        }})["settings"]
+        self.assertEqual(inline["model_type"], "minimax_h3_ref2va_pruned_pdd")
+        self.assertEqual(inline["postprocessing"]["application"], "inline")
+        self.assertEqual(len(inline["postprocessing"]["operations"]), 2)
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is required for saved-history migration validation")
+        javascript = _javascript_with_exports(
+            "normalizeRunMedia",
+            "normalizeRunSettings",
+            "stageModelInfo",
+            "runDescriptor",
+            "exportFieldValue",
+            "EXPORT_PRESETS",
+        )
+        test_script = r'''
+const api = globalThis.__statusProReleaseTest;
+const run = {
+  status: "completed",
+  imported_model_summary: "MiniMax H3 - Ref2VA Pruned PDD 8-Step 20B - Video",
+  media_type: "video",
+  output_count: 1,
+  outputs: ["output_post.mp4"],
+  output_records: [{path: "output_post.mp4", media_type: "video", settings: {}}],
+  settings: {
+    mode: "edit_postprocessing",
+    model_type: "minimax_h3_ref2va_pruned_pdd",
+    model_name: "MiniMax H3 Ref2VA Pruned PDD 8-Step 20B",
+    model_family: "MiniMax H3",
+    spatial_upsampling: "ltx252",
+    temporal_upsampling: "rife2",
+    film_grain_intensity: 0.2,
+    film_grain_saturation: 0.5,
+    activated_loras: ["stale-h3-lora.safetensors"],
+    attention_mode: "sage2",
+    component_models: {prepare: ["MiniMax-H3.safetensors"]}
+  },
+  stages: {},
+  step_performance: Array.from({length: 7}, (_, index) => ({
+    observer_id: "stale-h3",
+    sequence: index + 1,
+    phase: 0,
+    step: index + 1,
+    total_steps: 8,
+    duration_seconds: 1
+  })),
+  step_summary: {recorded_steps: 7, observed_passes: 1, passes: []}
+};
+api.normalizeRunMedia(run);
+if (run.settings.model_type !== "ltx2_25_22B_distilled") throw new Error("saved model type was not repaired");
+if (run.settings.model_name !== "LTX-2 2.5 Pixel Spatial Upscaler") throw new Error("saved model name was not repaired");
+if (run.settings.model_family !== "LTX-2") throw new Error("saved model family was not repaired");
+if (run.settings.num_inference_steps !== 8) throw new Error("saved LTX step count was not repaired");
+if (!run.settings.component_models || /MiniMax|Qwen/i.test(JSON.stringify(run.settings.component_models))) {
+  throw new Error("stale H3 components survived migration");
+}
+if (run.settings.attention_mode) throw new Error("stale H3 attention survived migration");
+if (run.step_performance.length || run.step_summary) throw new Error("stale H3 step observations survived migration");
+if (run.settings.activated_loras) throw new Error("stale H3 LoRAs survived migration");
+if (run.imported_model_summary) throw new Error("stale imported summary survived migration");
+if (api.runDescriptor(run) !== "RIFE x2 · LTX 2.5 Pixel Spatial Upscaler x2 · Film grain (intensity 0.2, saturation 0.5) - Video") {
+  throw new Error(`wrong repaired history label: ${api.runDescriptor(run)}`);
+}
+if (api.exportFieldValue(run, "model_name", new Set()) !== "LTX-2 2.5 Pixel Spatial Upscaler") {
+  throw new Error("repaired model name was not exported");
+}
+if (api.exportFieldValue(run, "checkpoint", new Set()) !== "ltx2_25_22B_distilled") {
+  throw new Error("repaired checkpoint was not exported");
+}
+const postprocessing = api.exportFieldValue(run, "postprocessing", new Set(["checkpoint"]));
+if (postprocessing.application !== "late" || postprocessing.operations.length !== 3) {
+  throw new Error("structured late post-processing was not exported");
+}
+if (postprocessing.operations[1].model.model_type !== "ltx2_25_22B_distilled") {
+  throw new Error("LTX backing model was not retained in structured post-processing");
+}
+const shareSafePostprocessing = api.exportFieldValue(run, "postprocessing", new Set(["postprocessing"]));
+if (shareSafePostprocessing.operations[1].model.model_type || shareSafePostprocessing.operations[1].model.component_models) {
+  throw new Error("share-safe post-processing leaked exact model metadata");
+}
+
+const liveSettings = {
+  mode: "edit_postprocessing",
+  model_type: "minimax_h3_ref2va_pruned_pdd",
+  model_name: "MiniMax H3 Ref2VA Pruned PDD 8-Step 20B",
+  spatial_upsampling: "ltx252",
+  component_models: {
+    input: ["MiniMax-H3-video_vae_fp16.safetensors", "MiniMax-H3-audio_vae_fp32.safetensors"],
+    encode: ["Qwen3-VL-32B-Instruct-layer50_quanto_bf16_int8.safetensors"],
+    decode: ["MiniMax-H3-video_vae_fp16.safetensors", "MiniMax-H3-audio_vae_fp32.safetensors"]
+  },
+  postprocessing: {
+    application: "late",
+    operations: [{
+      kind: "spatial_upsampling",
+      label: "LTX 2.5 Pixel Spatial Upscaler x2",
+      model: {
+        model_type: "ltx2_25_22B_distilled",
+        model_name: "LTX-2 2.5 Pixel Spatial Upscaler",
+        component_models: {
+          input: ["ltx-2.5-video-vae-bf16.safetensors", "ltx-2.5-audio-vae-bf16.safetensors"],
+          encode: ["gemma4-12b-with-proj-ltx-2.5-bf16.safetensors"],
+          decode: ["ltx-2.5-video-vae-bf16.safetensors", "ltx-2.5-audio-vae-bf16.safetensors"]
+        }
+      }
+    }]
+  }
+};
+api.normalizeRunSettings(liveSettings);
+if (liveSettings.component_models.encode[0] !== "gemma4-12b-with-proj-ltx-2.5-bf16.safetensors") {
+  throw new Error("live Encode did not switch from Qwen to the LTX backing text encoder");
+}
+if (liveSettings.component_models.decode.some(name => /MiniMax/i.test(name))) {
+  throw new Error("live Decode retained stale MiniMax VAEs");
+}
+
+const inlineLiveSettings = {
+  mode: "text_to_video",
+  model_type: "minimax_h3_ref2va_pruned_pdd",
+  spatial_upsampling: "ltx252",
+  component_models: {
+    encode: ["Qwen3-VL-32B-Instruct-layer50_quanto_bf16_int8.safetensors"]
+  },
+  postprocessing: liveSettings.postprocessing
+};
+const inlineNamespace = {activeRun: {settings: inlineLiveSettings}};
+const generationEncoder = api.stageModelInfo(inlineNamespace, {
+  id: "encode",
+  rawName: "Encoding prompt",
+  rawMessage: "Encoding prompt"
+});
+if (!generationEncoder || !/Qwen3-VL/.test(generationEncoder.names[0])) {
+  throw new Error("inline generation Encode lost its generation-model encoder");
+}
+const upscalerEncoder = api.stageModelInfo(inlineNamespace, {
+  id: "encode",
+  rawName: "Upsampling - Window 1 / 2 - Encoding prompt",
+  rawMessage: "Upsampling - Window 1 / 2 - Encoding prompt"
+});
+if (!upscalerEncoder || !/gemma4-12b/.test(upscalerEncoder.names[0])) {
+  throw new Error("inline upscaler Encode did not use its LTX backing encoder");
+}
+
+const unresolvedLiveSettings = {
+  mode: "edit_postprocessing",
+  model_type: "minimax_h3_ref2va_pruned_pdd",
+  spatial_upsampling: "ltx252",
+  component_models: {
+    encode: ["Qwen3-VL-32B-Instruct-layer50_quanto_bf16_int8.safetensors"],
+    decode: ["MiniMax-H3-video_vae_fp16.safetensors"]
+  }
+};
+api.normalizeRunSettings(unresolvedLiveSettings);
+if (!unresolvedLiveSettings.component_models || /Qwen|MiniMax/i.test(JSON.stringify(unresolvedLiveSettings.component_models))) {
+  throw new Error("unresolved live LTX components fell back to stale generation-model files");
+}
+if (!/Gemma 4 12B LTX/.test(unresolvedLiveSettings.component_models.encode[0])) {
+  throw new Error("unresolved LTX text encoder did not receive an accurate role fallback");
+}
+
+const lateNamespace = {activeRun: {settings: {
+  mode: "edit_postprocessing",
+  model_type: "minimax_h3_ref2va_pruned_pdd",
+  spatial_upsampling: "ltx252",
+  component_models: {
+    prepare: ["MiniMax-H3-Ref2VA.safetensors"],
+    input: ["MiniMax-H3-video_vae_fp16.safetensors"],
+    encode: ["Qwen3-VL.safetensors"],
+    decode: ["MiniMax-H3-video_vae_fp16.safetensors"]
+  }
+}}};
+for (const [id, rawName, expected] of [
+  ["prepare", "Loading model", /LTX-2\.5 22B distilled transformer/],
+  ["input", "Upsampling - Window 2 \/ 2 - Audio VAE encoding", /LTX-2\.5 (?:video|audio) VAE/],
+  ["encode", "Upsampling - Window 2 \/ 2 - Encoding prompt", /Gemma 4 12B LTX/],
+  ["decode", "Upsampling - Window 2 \/ 2 - VAE decoding", /LTX-2\.5 (?:video|audio) VAE/]
+]) {
+  const info = api.stageModelInfo(lateNamespace, {id, rawName, rawMessage: rawName});
+  if (!info || !expected.test(info.names.join(" ")) || /MiniMax|Qwen/i.test(info.names.join(" "))) {
+    throw new Error(`late LTX ${id} used generation-model details: ${JSON.stringify(info)}`);
+  }
+}
+
+const inlineRun = {
+  media_type: "video",
+  settings: {
+    mode: "text_to_video",
+    model_type: "minimax_h3_ref2va_pruned_pdd",
+    model_name: "MiniMax H3 Ref2VA Pruned PDD 8-Step 20B",
+    model_family: "MiniMax H3",
+    spatial_upsampling: "ltx252"
+  }
+};
+api.normalizeRunMedia(inlineRun);
+const inlineDescriptor = api.runDescriptor(inlineRun);
+if (!inlineDescriptor.startsWith("MiniMax H3 - Ref2VA Pruned PDD 8-Step 20B - Video")) {
+  throw new Error(`inline processing replaced the generation model: ${inlineDescriptor}`);
+}
+if (!inlineDescriptor.endsWith("Post: LTX 2.5 Pixel Spatial Upscaler x2")) {
+  throw new Error(`inline processor summary is missing: ${inlineDescriptor}`);
+}
+for (const preset of ["performance", "reproducibility", "share-safe"]) {
+  if (!api.EXPORT_PRESETS[preset].includes("postprocessing")) throw new Error(`${preset} omits post-processing`);
+}
+'''
+        result = subprocess.run(
+            [node, "-"],
+            input=javascript + "\n" + test_script,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        source = _source()
+        self.assertIn("normalizeRunSettings(settings);", source)
+        self.assertIn("normalizeRunSettings(settings);\n        namespace.activeRun.settings = settings;", source)
+
+    def test_postprocessing_progress_retains_the_eighth_ltx_step(self):
+        source = _source()
+        tree = ast.parse(source)
+        definitions = {
+            node.name: node
+            for node in tree.body
+            if isinstance(node, ast.FunctionDef)
+        }
+        constants = [
+            node for node in tree.body
+            if isinstance(node, ast.Assign)
+            and any(isinstance(target, ast.Name) and target.id == "MAX_STEP_TELEMETRY" for target in node.targets)
+        ]
+        helpers = [
+            definitions[name]
+            for name in (
+                "_telemetry_value",
+                "_memory_snapshot",
+                "_performance_snapshot",
+                "_latest_performance_snapshot",
+                "_new_performance_observer",
+                "_observe_postprocessing_progress",
+            )
+        ]
+        namespace = {"time": time, "_PROCESS": None}
+        module = ast.Module(body=[*constants, *helpers], type_ignores=[])
+        ast.fix_missing_locations(module)
+        exec(compile(module, str(PLUGIN_PATH), "exec"), namespace)
+
+        forwarded = []
+        performance = namespace["_new_performance_observer"](53)
+        callback = namespace["_observe_postprocessing_progress"](
+            performance,
+            lambda phase, current, total: forwarded.append((phase, current, total)),
+        )
+        for window in (1, 2):
+            phase = f"Window {window} / 2 - Distilled refinement"
+            for step in range(1, 9):
+                callback(phase, step, 8)
+
+        snapshot = namespace["_latest_performance_snapshot"]({}, performance)
+        self.assertEqual(snapshot["task_id"], 53)
+        self.assertEqual(len(snapshot["steps"]), 16)
+        self.assertEqual(snapshot["steps"][7]["step"], 8)
+        self.assertEqual(snapshot["steps"][15]["step"], 8)
+        self.assertEqual(snapshot["steps"][15]["phase"], 1)
+        self.assertEqual(len(forwarded), 16)
+
+        stale = namespace["_new_performance_observer"]()
+        stale["started_at"] = performance["started_at"] - 10
+        stale["steps"] = [{"sequence": 1, "step": 1, "total_steps": 8}]
+        selected = namespace["_latest_performance_snapshot"](
+            {"status_pro_performance": stale},
+            performance,
+        )
+        self.assertEqual(len(selected["steps"]), 16)
+        self.assertIn('self.request_global("perform_spatial_upsampling")', source)
+
+    def test_performance_observers_are_bound_to_their_queue_task_and_stale_timing_is_removed(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is required for performance-observer validation")
+        javascript = _javascript_with_exports("observePerformanceTelemetry", "normalizeRunMedia")
+        test_script = r'''
+const api = globalThis.__statusProReleaseTest;
+const run = {
+  queue_task_id: 2,
+  started_at: 100000,
+  completed_at: 130000,
+  duration_seconds: 30,
+  settings: {generation_time: 300},
+  step_performance: [],
+  outputs: [],
+  output_records: [],
+  stages: {}
+};
+api.observePerformanceTelemetry(run, {
+  performance: {
+    id: "previous-task-observer",
+    task_id: 1,
+    steps: [{sequence: 8, step: 8, total_steps: 8, completed_at: 110}]
+  }
+});
+if (run.step_performance.length !== 0) throw new Error("a previous task's final step leaked into the current run");
+api.observePerformanceTelemetry(run, {
+  performance: {
+    id: "current-task-observer",
+    task_id: "2",
+    steps: [{sequence: 1, step: 1, total_steps: 8, completed_at: 111}]
+  }
+});
+if (run.step_performance.length !== 1 || run.step_performance[0].step !== 1) {
+  throw new Error("the current task's observer was not retained");
+}
+if (run.step_performance[0].observer_task_id !== "2") {
+  throw new Error("observer task ownership was not persisted with the step");
+}
+api.normalizeRunMedia(run);
+if (Object.prototype.hasOwnProperty.call(run.settings, "generation_time")) {
+  throw new Error("impossible inherited generation time was retained");
+}
+
+const plausible = {
+  duration_seconds: 300,
+  settings: {generation_time: 305},
+  step_performance: [],
+  outputs: [],
+  output_records: [],
+  stages: {},
+  imported: true,
+  status: "completed",
+  output_count: 1
+};
+api.normalizeRunMedia(plausible);
+if (plausible.settings.generation_time !== 305) throw new Error("plausible WanGP timing was removed");
+
+const legacyLeak = {
+  queue_task_id: 2,
+  started_at: 1788118113505,
+  duration_seconds: 1283,
+  settings: {},
+  step_performance: [{
+    observer_id: "1788116331085856300",
+    sequence: 8,
+    step: 8,
+    total_steps: 8,
+    completed_at: 1788118121
+  }],
+  outputs: [],
+  output_records: [],
+  stages: {}
+};
+api.normalizeRunMedia(legacyLeak);
+if (legacyLeak.step_performance.length !== 0) {
+  throw new Error("a legacy observer that clearly predates the run was not repaired");
 }
 '''
         result = subprocess.run(
@@ -690,7 +1186,7 @@ if (savedExport.format !== "md" || savedExport.fields.length !== 2 || !savedExpo
     def test_history_recording_and_v105_history_display_helpers(self):
         node = shutil.which("node")
         if not node:
-            self.skipTest("Node is required for V1.0.4 history behavior validation")
+            self.skipTest("Node is required for V1.0.5 history behavior validation")
         javascript = _javascript_with_exports(
             "loadHistoryRecordingPreference",
             "setHistoryRecording",
@@ -788,6 +1284,8 @@ if (completion.latestFinishedAt !== 52000 || completion.latestDuration !== 12) t
         javascript = _javascript_with_exports(
             "freshState",
             "applySnapshot",
+            "recoverMissedPerformanceStages",
+            "stageDurations",
             "stageIdFor",
             "stageActivities",
             "STAGE_DEFS",
@@ -902,6 +1400,82 @@ if (!namespace.state.records.encode.unreported || namespace.state.records.encode
 namespace = {state: api.freshState(), activeRun: {}};
 api.applySnapshot(namespace, snapshot("decode"));
 if (namespace.state.records.decode.progress !== null) throw new Error("Decode exposed an invented percentage");
+
+const inactivityNow = Date.now;
+let inactivityClock = 1000;
+Date.now = () => inactivityClock;
+namespace = {state: api.freshState(), activeRun: {step_performance: []}};
+api.applySnapshot(namespace, snapshot("denoise"));
+namespace.state.inactiveSince = 1500;
+inactivityClock = 10000;
+api.applySnapshot(namespace, snapshot("decode"));
+Date.now = inactivityNow;
+if (namespace.state.records.denoise.state !== "complete" || namespace.state.records.decode.state !== "current") {
+  throw new Error("an active task was reset after a background-style tracker gap");
+}
+
+const backgroundSteps = Array.from({length: 8}, (_, index) => ({
+  observer_id: "background-generation",
+  sequence: index + 1,
+  phase: 0,
+  pass_no: -1,
+  step: index + 1,
+  total_steps: 8,
+  duration_seconds: 2.5,
+  completed_at: 100 + index * 2.5
+}));
+namespace = {
+  state: api.freshState(),
+  activeRun: {step_performance: backgroundSteps}
+};
+if (!api.recoverMissedPerformanceStages(namespace, snapshot("decode"))) {
+  throw new Error("backgrounded Generate telemetry was not recovered");
+}
+const recoveredGenerate = namespace.state.records.denoise;
+if (recoveredGenerate.state !== "complete" || !recoveredGenerate.recovered || Math.abs(recoveredGenerate.elapsed - 20) > 0.001) {
+  throw new Error(`recovered Generate stage is incorrect: ${JSON.stringify(recoveredGenerate)}`);
+}
+if (recoveredGenerate.stepCurrent !== 8 || recoveredGenerate.stepTotal !== 8 || namespace.state.phaseOrder.length !== 1) {
+  throw new Error("recovered Generate steps or phases are incomplete");
+}
+if (!namespace.state.records.prepare.unreported || !namespace.state.records.encode.unreported) {
+  throw new Error("unobserved prerequisite stages were not labelled honestly");
+}
+const recoveredTimings = api.stageDurations(namespace.state);
+if (!Object.values(recoveredTimings).some(stage => stage.stage === "denoise" && stage.duration_seconds === 20)) {
+  throw new Error("recovered Generate timing was not retained for History");
+}
+api.applySnapshot(namespace, snapshot("decode"));
+if (namespace.state.records.denoise.state !== "complete" || namespace.state.records.decode.state !== "current") {
+  throw new Error("Decode activation erased the recovered Generate stage");
+}
+
+const ltxWindowSteps = [];
+for (let windowNo = 1; windowNo <= 2; windowNo += 1) {
+  for (let stepNo = 1; stepNo <= 8; stepNo += 1) {
+    ltxWindowSteps.push({
+      observer_id: "background-ltx",
+      sequence: ltxWindowSteps.length + 1,
+      phase: windowNo - 1,
+      pass_no: -1,
+      label: `Window ${windowNo} / 2 - Distilled refinement`,
+      step: stepNo,
+      total_steps: 8,
+      duration_seconds: 1,
+      completed_at: 200 + ltxWindowSteps.length
+    });
+  }
+}
+namespace = {state: api.freshState(), activeRun: {step_performance: ltxWindowSteps}};
+api.recoverMissedPerformanceStages(namespace, {...snapshot("save"), rawName: "Saving output"});
+const recoveredPost = namespace.state.records.post;
+const recoveredPostPhases = namespace.state.phaseOrder.map(id => namespace.state.phases[id]).filter(phase => phase.stage === "post");
+if (recoveredPost.stepCurrent !== 16 || recoveredPost.stepTotal !== 16 || recoveredPostPhases.length !== 2) {
+  throw new Error("LTX subwindows were not recovered as two phases within one stage");
+}
+if (recoveredPostPhases[0].label !== "Window 1 / 2 - Distilled refinement" || recoveredPostPhases[1].label !== "Window 2 / 2 - Distilled refinement") {
+  throw new Error("recovered LTX subwindow labels were lost");
+}
 
 const qwenNamespace = {runTelemetry: {
   server_time: 100,

@@ -1,20 +1,17 @@
-# Status Pro v1.0.4
+# Status Pro v1.0.5
 
-Status Pro 1.0.4 improves generation-history reproducibility and makes detailed performance records easier to review. It observes WanGP's existing generation process and does not change model output or generation behaviour.
+Status Pro 1.0.5 makes post-processing history accurately describe the processor and components WanGP actually uses. It observes WanGP's existing generation process and does not change model output or generation behaviour.
 
 ## What's new
 
-- History records the effective attention mode used by each generation, including global, model-specific, and per-run choices. Sol Attention also records its tau level.
-- The History settings modal is larger and arranges checkbox panels in independent columns, fitting more fields without the empty space caused by shared grid rows.
-- Step observation tables include a display-only **Hide skipped** switch for focusing on steps where work was performed without removing telemetry from History or exports.
-- **Do not record new runs** can be selected from History settings. Live stages, elapsed time, ETA, downloads, and current performance continue normally, but newly completed, aborted, and failed runs are not added to History.
-- Existing records remain available for review, export, import, gallery actions, or clearing while automatic recording is off.
-- The top control reads **History off**, and prompt memory is paused until automatic recording is enabled again.
-- Expanded History uses clearer, top-aligned field labels and a less crowded responsive grid.
-- A measured **Observed timing composition** bar gives a quick stage-duration overview. Wall-clock time not covered by observed stages uses a theme-aware diagonal pattern instead of a fixed grey or theme accent.
-- Step observations highlight the fastest and slowest valid Time value within each pass. Skipped steps are excluded.
-- Visible LoRA names are reduced to filename-only labels without `.safetensors`, one per line; complete captured values remain available in tooltips and structured exports.
-- The completed top bar now shows only the latest generation's duration; session-wide counts, cumulative time, and the latest completion clock move to the expanded summary.
+- Standalone gallery post-processing records the LTX 2.3 or 2.5 upscaler as the effective model instead of inheriting the generation model selected in WanGP.
+- Inline post-processing preserves the original generation model and adds a separate `Post:` summary describing temporal upsampling, spatial upscaling, and film grain.
+- Live LTX stages identify the resolved LTX transformer, Gemma text encoder, and LTX video/audio VAEs. Accurate role labels replace stale H3/Qwen details if WanGP does not expose an exact filename.
+- LTX's own progress callbacks provide all eight refinement observations per internal subwindow. Subwindows remain labelled phases within one task, such as `Window 1 / 2` and `Window 2 / 2`.
+- Step observers are bound to their WanGP queue task, preventing the previous task's final callback from leaking into the next record.
+- Impossible inherited generation-time values are discarded, while plausible WanGP timing remains available.
+- Generate and LTX refinement details missed while the WanGP window is minimized are recovered from retained server-side callbacks when the page resumes or the run completes.
+- Existing retained and imported gallery-LTX records are normalized when loaded, including model identity, component metadata, step totals, and structured post-processing details.
 
 ## Privacy and retention
 

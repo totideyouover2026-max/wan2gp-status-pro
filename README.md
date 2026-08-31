@@ -4,7 +4,7 @@ Status Pro replaces Wan2GP's main status presentation with a responsive pipeline
 
 ![Status Pro V1 overview showing live pipeline tracking, timing metrics, and browser-local history](SlideDeck/1.png)
 
-Status Pro 1.0.4 has been tested with **WanGP 12.452 and later**, but does not declare a hard minimum because its observers degrade gracefully and may also work with earlier releases. It has no additional required Python dependencies; process-memory telemetry uses `psutil` when WanGP already provides it and degrades gracefully when unavailable.
+Status Pro 1.0.5 has been tested with **WanGP 12.452 and later**, but does not declare a hard minimum because its observers degrade gracefully and may also work with earlier releases. It has no additional required Python dependencies; process-memory telemetry uses `psutil` when WanGP already provides it and degrades gracefully when unavailable.
 
 [User guide](USER_GUIDE.md) · [Installation](#install-and-enable) · [Release notes](RELEASE_NOTES.md)
 
@@ -80,6 +80,7 @@ For a practical explanation of every stage, History, storage modes, exports, and
 - Retains the prompt unit actually assigned to each sliding window for the current browser-tab session.
 - Displays model filenames in history instead of long local paths or Hugging Face download URLs, while retaining the original setting in structured exports.
 - Summarizes each history row with its model platform, variant, media type, and resolution; the exact checkpoint remains in the expanded details.
+- Records temporal upsampling, spatial upsampling or visual refinement, and film grain separately from the generation model. Inline processing keeps the generation model as primary, while late processing of a selected gallery file receives its own processor-led summary.
 - Shows total wall-clock time, Wan2GP's recorded generation time, model/setup time, and only materially unaccounted time derived from observed phases.
 - Exposes model-specific Guidance 2 and Guidance 3 values, and labels frame counts without implying an unknown video duration.
 - Records the effective attention mode used by each run—such as Flash Attention, Sage, SDPA, or Sol Attention—and includes the Sol tau level when applicable.

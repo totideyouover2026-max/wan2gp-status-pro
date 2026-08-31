@@ -2,6 +2,20 @@
 
 All notable Status Pro changes will be recorded here. Versions follow Semantic Versioning.
 
+## [1.0.5] - 2026-08-31
+
+### Fixed
+
+- Standalone LTX 2.3/2.5 pixel-spatial upscaling records now identify the model-backed upsampler actually loaded instead of inheriting the generation model selected in WanGP. Existing retained and imported records are repaired when loaded, including their UI summary and exported model fields.
+- Live LTX upscaling stages now use the LTX backing component list, so Inputs/Decode identify the resolved LTX VAEs and Encode identifies the resolved Gemma text encoder. This applies to standalone gallery tasks and the upscaling portion of inline runs; stale generation-model components are suppressed when exact LTX files are unavailable.
+- Standalone gallery processing now treats every internal LTX subwindow as part of the same processor task and keeps LTX component identity across Prepare, Inputs, Encode, and Decode. Exact WanGP-resolved filenames are preferred; accurate LTX/Gemma/VAE role labels are used when a model definition omits a filename, never the selected generation model's H3/Qwen components.
+- LTX gallery and inline upscaling now capture the registered processor's own progress callbacks, retain the final eighth refinement observation across WanGP task teardown, and record eight configured steps per window instead of reusing stale generation-step telemetry.
+- Performance observers are now bound to their WanGP queue task, preventing a preceding task's final callback from appearing as the next run's only step observation; retained legacy rows whose observer clearly predates the run are repaired when loaded.
+- History now rejects an inherited WanGP `generation_time` when it is impossible for the observed run's wall-clock duration, while retaining plausible reported timings.
+- Live Generate and LTX refinement stages now recover missed timing, step, and phase details from retained server-side callbacks after a minimized or backgrounded WanGP window resumes. Visibility/focus changes trigger an immediate resynchronization, and phases not exposed while backgrounded are labelled as unreported instead of appearing not to have run.
+- Retained gallery-LTX records discard legacy step rows that cannot be attributed to an upscaler phase; Status Pro does not relabel or synthesize observations that the older telemetry did not capture.
+- Post-processing is now a distinct structured history field. Inline temporal/spatial upsampling and film grain preserve the generation model and add a `Post:` summary; gallery late-processing tasks use a processor-led summary, and expanded details identify whether processing ran with generation or as a separate task.
+
 ## [1.0.4] - 2026-08-24
 
 ### Added
