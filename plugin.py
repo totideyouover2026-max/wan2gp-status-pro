@@ -1,3 +1,4 @@
+import builtins
 import json
 import os
 import threading
@@ -16,6 +17,22 @@ except Exception:  # Optional: Status Pro still works without process memory tel
 from shared.utils.plugins import WAN2GPPlugin
 from shared.utils import prompt_parser
 from .download_telemetry import DOWNLOAD_TELEMETRY, install_download_observer
+
+
+_STATUS_VARIANT_REGISTRY_KEY = "_wan2gp_status_plugin_variants_v1"
+
+
+def _register_status_variant(variant: str) -> set:
+    """Advertise an enabled Status plugin variant within this Wan2GP process."""
+    variants = getattr(builtins, _STATUS_VARIANT_REGISTRY_KEY, None)
+    if not isinstance(variants, set):
+        variants = set()
+        setattr(builtins, _STATUS_VARIANT_REGISTRY_KEY, variants)
+    variants.add(str(variant or "").strip().lower())
+    return variants
+
+
+_register_status_variant("pro")
 
 
 RUN_SETTING_KEYS = (
@@ -929,7 +946,7 @@ class StatusProPlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = "Status Pro"
-        self.version = "1.0.5"
+        self.version = "1.0.6"
         self.description = (
             "Selectable pipeline timeline with stage timings and live ETA estimates."
         )
@@ -7041,7 +7058,7 @@ class StatusProPlugin(WAN2GPPlugin):
             downloadText(`status-pro-${stamp}.json`, "application/json;charset=utf-8", JSON.stringify({
                 exported_at: exportedAt.toISOString(),
                 exported_at_local: localIsoTimestamp(exportedAt),
-                version: "1.0.5",
+                version: "1.0.6",
                 ...metadata,
                 runs: records
             }, null, 2));
@@ -8073,13 +8090,26 @@ class StatusProPlugin(WAN2GPPlugin):
         root.appendChild(style);
     }
 
+    function nativeStatusSource(root, container) {
+        const nativeSource = root.querySelector("#gen_status");
+        if (nativeSource && nativeSource !== container) return nativeSource;
+        let candidate = container.previousElementSibling;
+        while (candidate && (
+            candidate.id === "status-pro-container" ||
+            candidate.id === "status-lite-container"
+        )) {
+            candidate = candidate.previousElementSibling;
+        }
+        return candidate;
+    }
+
     function bind() {
         const root = appRoot();
         const container = root.querySelector("#status-pro-container");
         const host = root.querySelector("#status-pro-host");
         if (!container || !host) return false;
         const panel = host.querySelector("[data-status-pro]");
-        const source = container.previousElementSibling;
+        const source = nativeStatusSource(root, container);
         if (!panel || !source) return false;
 
         installStyle(root);

@@ -4,7 +4,7 @@ Status Pro replaces Wan2GP's main status presentation with a responsive pipeline
 
 ![Status Pro V1 overview showing live pipeline tracking, timing metrics, and browser-local history](SlideDeck/1.png)
 
-Status Pro 1.0.5 has been tested with **WanGP 12.452 and later**, but does not declare a hard minimum because its observers degrade gracefully and may also work with earlier releases. It has no additional required Python dependencies; process-memory telemetry uses `psutil` when WanGP already provides it and degrades gracefully when unavailable.
+Status Pro 1.0.6 has been tested with **WanGP 12.452 and later**, but does not declare a hard minimum because its observers degrade gracefully and may also work with earlier releases. It has no additional required Python dependencies; process-memory telemetry uses `psutil` when WanGP already provides it and degrades gracefully when unavailable.
 
 [User guide](USER_GUIDE.md) · [Installation](#install-and-enable) · [Release notes](RELEASE_NOTES.md)
 
@@ -156,6 +156,8 @@ Download telemetry is collected by plugin-local runtime wrappers. Wan2GP and Hug
 ### Manual installation
 
 Place the repository contents in `plugins/wan2gp-status-pro/`, enable the plugin in WanGP's **Plugins** tab, save the setting, and restart WanGP.
+
+Status Pro and Status Lite are alternative presentations. If both are enabled, Status Pro takes precedence and Status Lite remains dormant for that WanGP session, so callbacks and the native status component are observed only once.
 
 Updates installed through Git should be applied from the Plugins tab followed by a WanGP restart. Uninstalling or disabling Status Pro does not automatically delete history retained with **Until manually cleared**; clear it from Status Pro before removal if desired.
 

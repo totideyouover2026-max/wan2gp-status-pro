@@ -1,9 +1,11 @@
-# Status Pro v1.0.5
+# Status Pro v1.0.6
 
-Status Pro 1.0.5 makes post-processing history accurately describe the processor and components WanGP actually uses. It observes WanGP's existing generation process and does not change model output or generation behaviour.
+Status Pro 1.0.6 makes Status Pro and Status Lite safe to install together while retaining the post-processing accuracy improvements from 1.0.5. It observes WanGP's existing generation process and does not change model output or generation behaviour.
 
 ## What's new
 
+- When both Status editions are enabled, Status Pro takes precedence and Status Lite remains dormant. This prevents duplicate callback/download observers and competing status panels.
+- Both editions resolve WanGP's native status component independently of plugin insertion order.
 - Standalone gallery post-processing records the LTX 2.3 or 2.5 upscaler as the effective model instead of inheriting the generation model selected in WanGP.
 - Inline post-processing preserves the original generation model and adds a separate `Post:` summary describing temporal upsampling, spatial upscaling, and film grain.
 - Live LTX stages identify the resolved LTX transformer, Gemma text encoder, and LTX video/audio VAEs. Accurate role labels replace stale H3/Qwen details if WanGP does not expose an exact filename.

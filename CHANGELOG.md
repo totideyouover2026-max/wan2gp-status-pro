@@ -2,6 +2,13 @@
 
 All notable Status Pro changes will be recorded here. Versions follow Semantic Versioning.
 
+## [1.0.6] - 2026-09-01
+
+### Fixed
+
+- Status Pro and Status Lite can now be installed together safely. When both are enabled, Status Pro deterministically takes precedence and Lite does not install duplicate backend observers or insert a competing panel.
+- Status panels now locate WanGP's native `gen_status` component directly, with a sibling fallback that skips either plugin container, so plugin insertion order cannot make one panel observe the other.
+
 ## [1.0.5] - 2026-08-31
 
 ### Fixed

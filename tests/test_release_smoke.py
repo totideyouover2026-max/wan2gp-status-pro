@@ -76,13 +76,23 @@ class ReleaseSmokeTests(unittest.TestCase):
             self.assertTrue((ROOT / document).is_file(), document)
         manifest = json.loads((ROOT / "plugin_info.json").read_text(encoding="utf-8"))
         version = manifest["version"]
-        self.assertEqual(version, "1.0.5")
+        self.assertEqual(version, "1.0.6")
         self.assertIn(f'self.version = "{version}"', source)
         self.assertIn(f'version: "{version}"', source)
         self.assertEqual(manifest["type"], "extension")
         # WanGP backfills blank metadata from its cached catalogue. A populated
         # zero baseline behaves as no hard minimum without reviving stale values.
         self.assertEqual(manifest["wan2gp_version"], "0")
+
+    def test_status_variants_share_native_source_safely(self):
+        source = _source()
+        javascript = _returned_string("_javascript")
+        self.assertIn('import builtins', source)
+        self.assertIn('_register_status_variant("pro")', source)
+        self.assertIn('function nativeStatusSource(root, container)', javascript)
+        self.assertIn('root.querySelector("#gen_status")', javascript)
+        self.assertIn('candidate.id === "status-lite-container"', javascript)
+        self.assertNotIn('const source = container.previousElementSibling', javascript)
 
     def test_embedded_markup_has_release_controls(self):
         markup = _returned_string("_markup")
