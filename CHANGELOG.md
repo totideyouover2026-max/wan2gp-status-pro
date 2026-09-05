@@ -2,10 +2,19 @@
 
 All notable Status Pro changes will be recorded here. Versions follow Semantic Versioning.
 
-## [1.0.6] - 2026-09-01
+## [1.0.6] - 2026-09-05
 
 ### Fixed
 
+- Temporary or incomplete telemetry snapshots no longer close an active generation's history record.
+- Shared history reconciles changes and deletions across browser tabs, with serialized writes when the browser supports Web Locks. Tab-local history remains independent.
+- Queue completion banners distinguish completed, failed, aborted, and incomplete runs.
+- Per-step memory observations no longer cause periodic samples to be counted twice in memory averages.
+- Missing or invalid export timestamps remain empty instead of becoming January 1970 dates.
+- A stopped queue no longer revives a Prepare stage from lingering abort text or completed asset activity.
+- Runs that finish while the WanGP window is minimized now use WanGP's reported queue duration or the generated output's creation timestamp, rather than treating the later browser-resume time as completion. The idle minimized gap no longer inflates History's Completed and Total time fields or the final observed stage.
+- Previously retained affected records are repaired when loaded when their output metadata provides an authoritative completion time. Any stage duration made impossible by the old resume-time stamp is shown as unreported instead of retained as false work.
+- Gallery-applied LTX 2/2.5 `Distilled refinement` progress is now classified as Enhance instead of falling through to Prepare. Enhance timing resumes from the earlier upsampling-start phase after the workflow's Inputs and Encode stages.
 - Status Pro and Status Lite can now be installed together safely. When both are enabled, Status Pro deterministically takes precedence and Lite does not install duplicate backend observers or insert a competing panel.
 - Status panels now locate WanGP's native `gen_status` component directly, with a sibling fallback that skips either plugin container, so plugin insertion order cannot make one panel observe the other.
 

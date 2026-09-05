@@ -279,7 +279,7 @@ Status Pro observes WanGP from the browser at short intervals. Small differences
 
 ### What happens if WanGP is minimized during generation?
 
-Browsers can pause or heavily throttle live page timers while a window is minimized. When the page resumes, Status Pro recovers missed Generate and LTX refinement timing, steps, and subwindow phases from WanGP callbacks retained by the plugin backend. Prepare or Encode work that emitted no durable callback is marked **Not reported** rather than being assigned an invented duration.
+Browsers can pause or heavily throttle live page timers while a window is minimized. When the page resumes, Status Pro recovers missed Generate and LTX refinement timing, steps, and subwindow phases from WanGP callbacks retained by the plugin backend. If the task already finished, its completion and total duration are anchored to WanGP's reported queue duration or output creation time, so the idle gap before the window is restored is excluded. Prepare or Encode work that emitted no durable callback is marked **Not reported** rather than being assigned an invented duration. Previously retained records with an inflated resume-time completion are repaired automatically when their output metadata contains a trustworthy timestamp.
 
 ### Why are there more step observations than configured steps?
 

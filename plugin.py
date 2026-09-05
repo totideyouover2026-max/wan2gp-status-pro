@@ -1766,6 +1766,7 @@ class StatusProPlugin(WAN2GPPlugin):
     const TICK_MS = 250;
     const IDLE_GRACE_MS = 1600;
     const RESET_AFTER_MS = 3000;
+    const COMPLETION_GAP_REPAIR_MS = 30000;
 
     const EXPORT_FIELD_DEFS = [
         { id: "run_id", label: "Run ID", group: "Run" },
@@ -3584,8 +3585,10 @@ class StatusProPlugin(WAN2GPPlugin):
     function observeResourceSample(run, sample, includeInAverage = true) {
         if (!run || !sample || typeof sample !== "object") return;
         const sampledAt = optionalNumber(sample.sampled_at);
-        if (Number.isFinite(sampledAt) && sampledAt === run._last_resource_sample_at) return;
-        if (Number.isFinite(sampledAt)) run._last_resource_sample_at = sampledAt;
+        if (includeInAverage && Number.isFinite(sampledAt)) {
+            if (sampledAt <= (run._last_periodic_resource_sample_at ?? -Infinity)) return;
+            run._last_periodic_resource_sample_at = sampledAt;
+        }
         const resources = run.resources || {
             sample_count: 0,
             observation_count: 0,
@@ -3666,6 +3669,7 @@ class StatusProPlugin(WAN2GPPlugin):
     function finalizePerformance(run) {
         if (!run) return;
         delete run._last_resource_sample_at;
+        delete run._last_periodic_resource_sample_at;
         delete run._performance_step_keys;
         const resources = run.resources;
         if (resources && resources.metrics) {
@@ -3798,7 +3802,7 @@ class StatusProPlugin(WAN2GPPlugin):
 
         if (/\b(?:denois|diffus|sampl|synthesis|synthes|generating\s+(?:audio|waveform|speech)|spectrum\s+smoothing\s+replay)/.test(name)) return "denoise";
         if (/(?:vae\s*decod|decod|reconstruct)/.test(name)) return "decode";
-        if (/(?:post.?process|upscal|upsampl|interpol|color correction|film grain|tcdecoder|seedvc|voice replacement|audio post|soundtrack|enhanc)/.test(name)) return "post";
+        if (/(?:post.?process|upscal|upsampl|spatial refin|distilled refinement|interpol|color correction|film grain|tcdecoder|seedvc|voice replacement|audio post|soundtrack|enhanc)/.test(name)) return "post";
         if (/(?:encod|prompt|condition|embed|feature|token)/.test(name)) return "encode";
         if (/(?:prepar|initial|load|download|queue|cache|start)/.test(name)) return "prepare";
         return "prepare";
@@ -4030,7 +4034,71 @@ class StatusProPlugin(WAN2GPPlugin):
         }
     }
 
+    function reconcileRunHistory(namespace) {
+        if (namespace.historyPersistence === "browser") return;
+        const mode = namespace.historyPersistence;
+        if (!namespace.historyBaseline || namespace.historyBaselineMode !== mode) return;
+        let remote;
+        try {
+            const parsed = JSON.parse(runHistoryStorage(mode).getItem(runHistoryKey(mode)) || "[]");
+            if (!Array.isArray(parsed)) return;
+            remote = parsed.filter(run => run && typeof run === "object").map(normalizeRunMedia);
+        } catch (_) { return; }
+        const baseline = new Map(namespace.historyBaseline.map(run => [String(run.id), run]));
+        const local = new Map(namespace.runHistory.map(run => [String(run.id), run]));
+        const merged = new Map(remote.map(run => [String(run.id), run]));
+        // Missing baseline entries are intentional local deletions. Unchanged
+        // local entries must never resurrect records deleted by another tab.
+        for (const id of baseline.keys()) if (!local.has(id)) merged.delete(id);
+        for (const [id, run] of local) {
+            if (!baseline.has(id)) merged.set(id, run);
+            else if (merged.has(id) && JSON.stringify(run) !== JSON.stringify(baseline.get(id))) merged.set(id, run);
+        }
+        namespace.runHistory = Array.from(merged.values()).sort((a, b) =>
+            (Number(b.completed_at) || 0) - (Number(a.completed_at) || 0)
+        ).slice(0, MAX_RUN_HISTORY);
+        namespace.historyBaseline = cloneJson(remote, []);
+        pruneHistoryReferences(namespace);
+        namespace.historyRenderKey = null;
+    }
+
+    function pruneHistoryReferences(namespace) {
+        const ids = new Set(namespace.runHistory.map(run => String(run.id)));
+        for (const key of ["sessionRunIds", "selectedRunIds", "openHistoryRuns"]) {
+            if (namespace[key]) namespace[key] = new Set(Array.from(namespace[key]).filter(id => ids.has(String(id))));
+        }
+        if (namespace.recoverablePrompts) {
+            for (const id of namespace.recoverablePrompts.keys()) if (!ids.has(String(id))) namespace.recoverablePrompts.delete(id);
+        }
+    }
+
+    function afterHistoryWrite(result, callback) {
+        return result && typeof result.then === "function" ? result.then(callback) : callback(result);
+    }
+
     function persistRunHistory(namespace) {
+        const mode = namespace.historyPersistence;
+        const save = () => {
+            if (namespace.historyPersistence !== mode) return {persisted: false, dropped: 0};
+            reconcileRunHistory(namespace);
+            const result = persistReconciledRunHistory(namespace);
+            if (namespace.panel && namespace.host && namespace.host.isConnected) {
+                if (namespace.activeRun) render(namespace);
+                else renderIdle(namespace);
+            }
+            return result;
+        };
+        const locks = window.navigator && window.navigator.locks;
+        if (mode !== "browser" && locks && typeof locks.request === "function") {
+            return locks.request(runHistoryKey(mode), save).catch(() => {
+                namespace.historyStorageNotice = "History could not be saved. It remains available in this page.";
+                return {persisted: false, dropped: 0};
+            });
+        }
+        return save();
+    }
+
+    function persistReconciledRunHistory(namespace) {
         const before = namespace.runHistory.slice(0, MAX_RUN_HISTORY);
         const storedHistory = namespace.promptMemory !== false && modeStoresPrompts(namespace.historyPersistence)
             ? before
@@ -4043,6 +4111,9 @@ class StatusProPlugin(WAN2GPPlugin):
             return result;
         }
         namespace.runHistory = result.retained;
+        namespace.historyBaseline = result.retained.map(run => stripRunPrompts(cloneJson(run, {})));
+        namespace.historyBaselineMode = namespace.historyPersistence;
+        pruneHistoryReferences(namespace);
         if (result.dropped > 0) {
             const retainedIds = new Set(result.retained.map(run => String(run.id)));
             namespace.sessionRunIds = new Set(Array.from(namespace.sessionRunIds).filter(id => retainedIds.has(String(id))));
@@ -4072,7 +4143,10 @@ class StatusProPlugin(WAN2GPPlugin):
             return false;
         }
 
+        reconcileRunHistory(namespace);
         const previousHistory = namespace.runHistory;
+        const previousBaseline = namespace.historyBaseline;
+        const previousBaselineMode = namespace.historyBaselineMode;
         let nextHistory = previousHistory.map(run => cloneJson(run, {}));
         if (namespace.promptMemory === false || !modeStoresPrompts(next)) {
             if (namespace.promptMemory !== false) nextHistory.forEach(run => cacheRunPrompts(namespace, run));
@@ -4083,21 +4157,26 @@ class StatusProPlugin(WAN2GPPlugin):
 
         if (next === "runtime") prepareRuntimeHistory(namespace.runtimeId);
         namespace.historyPersistence = next;
+        namespace.historyBaseline = [];
+        namespace.historyBaselineMode = next;
         namespace.runHistory = nextHistory;
         namespace.historyStorageNotice = "";
-        const result = persistRunHistory(namespace);
-        if (!result.persisted) {
-            namespace.historyPersistence = previous;
-            namespace.runHistory = previousHistory;
-            namespace.historyStorageNotice = `Could not switch history to ${historyPersistenceLabel(next).toLowerCase()} storage in this browser.`;
-            return false;
-        }
+        return afterHistoryWrite(persistRunHistory(namespace), result => {
+            if (!result.persisted) {
+                namespace.historyBaseline = previousBaseline;
+                namespace.historyBaselineMode = previousBaselineMode;
+                namespace.historyPersistence = previous;
+                namespace.runHistory = previousHistory;
+                namespace.historyStorageNotice = `Could not switch history to ${historyPersistenceLabel(next).toLowerCase()} storage in this browser.`;
+                return false;
+            }
 
-        clearRunHistoryStorage(previous);
-        saveHistoryPersistence(next);
-        if (next === "browser") namespace.recoverablePrompts.clear();
-        namespace.historyRenderKey = null;
-        return true;
+            clearRunHistoryStorage(previous);
+            saveHistoryPersistence(next);
+            if (next === "browser") namespace.recoverablePrompts.clear();
+            namespace.historyRenderKey = null;
+            return true;
+        });
     }
 
     function setPromptMemory(namespace, enabled) {
@@ -4349,6 +4428,7 @@ class StatusProPlugin(WAN2GPPlugin):
 
     function clearRuntimeScopedHistory(namespace) {
         namespace.runHistory = [];
+        namespace.historyBaseline = [];
         namespace.sessionRunIds.clear();
         namespace.selectedRunIds.clear();
         namespace.recoverablePrompts.clear();
@@ -4467,10 +4547,10 @@ class StatusProPlugin(WAN2GPPlugin):
         return stages;
     }
 
-    function finishPhase(state) {
+    function finishPhase(state, completedAt = Date.now()) {
         const record = state.phases[state.currentPhaseId];
         if (!record || record.state !== "current") return;
-        record.elapsed = (Date.now() - record.startedAt) / 1000;
+        record.elapsed = Math.max(0, (completedAt - record.startedAt) / 1000);
         record.state = "complete";
     }
 
@@ -4619,11 +4699,62 @@ class StatusProPlugin(WAN2GPPlugin):
         return optionalNumber(record && record.settings && record.settings.window_no);
     }
 
-    function outputBoundaryTime(run, record, fallback) {
+    function outputRecordTimestamp(record) {
         const settings = record && record.settings || {};
         let timestamp = optionalNumber(settings.creation_timestamp);
         if (Number.isFinite(timestamp)) timestamp *= timestamp < 100000000000 ? 1000 : 1;
         else timestamp = Date.parse(settings.creation_date || "");
+        return Number.isFinite(timestamp) ? timestamp : null;
+    }
+
+    function outputCompletionTimestamp(run, records, observedAt) {
+        const startedAt = optionalNumber(run && run.started_at);
+        const upperBound = Number.isFinite(observedAt) ? observedAt + 1000 : Infinity;
+        const timestamps = (Array.isArray(records) ? records : [])
+            .map(outputRecordTimestamp)
+            .filter(timestamp =>
+                Number.isFinite(timestamp) &&
+                (!Number.isFinite(startedAt) || timestamp >= startedAt - 1000) &&
+                timestamp <= upperBound
+            );
+        return timestamps.length ? Math.max(...timestamps) : null;
+    }
+
+    function outputGenerationDuration(records) {
+        const durations = (Array.isArray(records) ? records : [])
+            .map(record => optionalNumber(record && record.settings && record.settings.generation_time))
+            .filter(value => Number.isFinite(value) && value >= 0 && value <= 86400);
+        return durations.length ? Math.max(...durations) : null;
+    }
+
+    function reportedQueueDuration(telemetry) {
+        if (telemetry && telemetry.active_task) return null;
+        const status = String(telemetry && telemetry.status || "");
+        const match = status.match(/Total Generation Time\s*:\s*(.+)$/i);
+        return match ? parseDuration(match[1]) : null;
+    }
+
+    function inferredRunCompletionTime(run, telemetry, observedAt, records) {
+        const fallback = Number.isFinite(observedAt) ? observedAt : Date.now();
+        const startedAt = optionalNumber(run && run.started_at);
+        const windowed = optionalNumber(run && run.total_windows) > 1;
+        const outputCompletion = outputCompletionTimestamp(run, records, fallback);
+        if (Number.isFinite(outputCompletion)) return outputCompletion;
+        const generationDuration = windowed ? null : outputGenerationDuration(records);
+        if (Number.isFinite(startedAt) && Number.isFinite(generationDuration)) {
+            const generatedCompletion = startedAt + generationDuration * 1000;
+            if (generatedCompletion >= startedAt && generatedCompletion <= fallback + 1000) return generatedCompletion;
+        }
+        const reportedDuration = windowed ? null : reportedQueueDuration(telemetry);
+        if (Number.isFinite(startedAt) && Number.isFinite(reportedDuration)) {
+            const reportedCompletion = startedAt + reportedDuration * 1000;
+            if (reportedCompletion >= startedAt && reportedCompletion <= fallback + 1000) return reportedCompletion;
+        }
+        return fallback;
+    }
+
+    function outputBoundaryTime(run, record, fallback) {
+        const timestamp = outputRecordTimestamp(record);
         if (!Number.isFinite(timestamp) || timestamp < run.started_at || timestamp > fallback) return fallback;
         return timestamp;
     }
@@ -4982,6 +5113,36 @@ class StatusProPlugin(WAN2GPPlugin):
         return false;
     }
 
+    function repairBackgroundCompletionTiming(run) {
+        if (!run || !["completed", "window"].includes(String(run.status || ""))) return false;
+        const startedAt = optionalNumber(run.started_at);
+        const completedAt = optionalNumber(run.completed_at);
+        if (!Number.isFinite(startedAt) || !Number.isFinite(completedAt) || completedAt < startedAt) return false;
+        const records = Array.isArray(run.output_records) ? run.output_records : [];
+        let correctedAt = outputCompletionTimestamp(run, records, completedAt);
+        if (!Number.isFinite(correctedAt) && optionalNumber(run.total_windows) <= 1) {
+            const generationDuration = outputGenerationDuration(records) ?? optionalNumber(setting(run.settings || {}, "generation_time"));
+            if (Number.isFinite(generationDuration) && generationDuration >= 0 && generationDuration <= 86400) {
+                correctedAt = startedAt + generationDuration * 1000;
+            }
+        }
+        if (
+            !Number.isFinite(correctedAt) || correctedAt < startedAt || correctedAt > completedAt ||
+            completedAt - correctedAt <= COMPLETION_GAP_REPAIR_MS
+        ) return false;
+
+        run.completed_at = correctedAt;
+        run.duration_seconds = Math.max(0, Math.round((correctedAt - startedAt) / 100) / 10);
+        Object.values(run.stages || {}).forEach(stage => {
+            const duration = optionalNumber(stage && stage.duration_seconds);
+            if (!Number.isFinite(duration) || duration <= run.duration_seconds + 1) return;
+            delete stage.duration_seconds;
+            stage.status = "unreported";
+            stage.unreported = true;
+        });
+        return true;
+    }
+
     function normalizeRunMedia(run) {
         const declaredMediaType = String(run && run.media_type || "").toLowerCase();
         const declaredFrameCount = optionalNumber(run && run.frame_count);
@@ -4991,7 +5152,6 @@ class StatusProPlugin(WAN2GPPlugin):
         run.step_performance = Array.isArray(run.step_performance) ? run.step_performance : [];
         run.resources = run.resources && typeof run.resources === "object" ? run.resources : null;
         run.step_summary = run.step_summary && typeof run.step_summary === "object" ? run.step_summary : null;
-        repairImpossibleGenerationTime(run);
         repairCrossTaskPerformance(run);
         repairLatePostprocessingPerformance(run);
         const repairedStepTotals = repairInheritedPassTotals(run);
@@ -5009,6 +5169,8 @@ class StatusProPlugin(WAN2GPPlugin):
                 : mediaTypeFromPath(record.path);
             record.settings = record.settings && typeof record.settings === "object" ? record.settings : {};
         });
+        repairBackgroundCompletionTiming(run);
+        repairImpossibleGenerationTime(run);
         const mediaTypes = Array.from(new Set(run.output_records.map(record => record.media_type).filter(type => type && type !== "unknown")));
         if (!mediaTypes.length && ["image", "video", "audio"].includes(declaredMediaType)) mediaTypes.push(declaredMediaType);
         if (!mediaTypes.length && Number(run.settings.image_mode) > 0) mediaTypes.push("image");
@@ -5113,21 +5275,26 @@ class StatusProPlugin(WAN2GPPlugin):
     function finishRun(namespace, status, completedAt, telemetry, outputEnd) {
         const run = namespace.activeRun;
         if (!run) return;
-        observePerformanceTelemetry(run, telemetry || namespace.runTelemetry);
+        const telemetrySnapshot = telemetry || namespace.runTelemetry;
+        observePerformanceTelemetry(run, telemetrySnapshot);
         recoverMissedPerformanceStages(namespace);
-        finishStage(namespace.state, namespace.state.currentId);
-        finishPhase(namespace.state);
-        const ended = Number.isFinite(completedAt) ? completedAt : Date.now();
-        run.completed_at = ended;
-        run.duration_seconds = Math.max(0, Math.round((ended - run.started_at) / 100) / 10);
-        run.stages = stageDurations(namespace.state);
-        finalizePerformance(run);
-        const outputRecords = currentOutputRecords(telemetry || namespace.runTelemetry);
+        const bridgeObservedAt = Number(telemetrySnapshot && telemetrySnapshot.server_time) * 1000 || Date.now();
+        const observedEnded = Number.isFinite(completedAt) ? completedAt : bridgeObservedAt;
+        const outputRecords = currentOutputRecords(telemetrySnapshot);
         const outputStart = Math.min(run.output_baseline || 0, outputRecords.length);
         const outputLimit = Number.isFinite(outputEnd)
             ? Math.min(Math.max(outputStart, Math.floor(outputEnd)), outputRecords.length)
             : outputRecords.length;
-        run.output_records = outputRecords.slice(outputStart, outputLimit);
+        const completedOutputRecords = outputRecords.slice(outputStart, outputLimit);
+        const ended = inferredRunCompletionTime(run, telemetrySnapshot, observedEnded, completedOutputRecords);
+        const browserStageEnded = Date.now() - Math.max(0, bridgeObservedAt - ended);
+        finishStage(namespace.state, namespace.state.currentId, browserStageEnded);
+        finishPhase(namespace.state, browserStageEnded);
+        run.completed_at = ended;
+        run.duration_seconds = Math.max(0, Math.round((ended - run.started_at) / 100) / 10);
+        run.stages = stageDurations(namespace.state);
+        finalizePerformance(run);
+        run.output_records = completedOutputRecords;
         run.outputs = run.output_records.map(record => String(record.path || "")).filter(Boolean);
         if (run.output_records.length && run.output_records[0].settings) {
             run.settings = {
@@ -5202,7 +5369,7 @@ class StatusProPlugin(WAN2GPPlugin):
 
     function syncRunTelemetry(namespace) {
         const telemetry = readRunSnapshot(namespace);
-        if (!telemetry) return;
+        if (!telemetry || telemetry.error || typeof telemetry.in_progress !== "boolean") return;
         const task = telemetry.active_task && typeof telemetry.active_task === "object"
             ? telemetry.active_task
             : null;
@@ -5227,7 +5394,7 @@ class StatusProPlugin(WAN2GPPlugin):
             return;
         }
 
-        if (namespace.activeRun) {
+        if (namespace.activeRun && telemetry.in_progress === false) {
             splitMissedSlidingWindows(namespace, null, telemetry, now);
             observeRunOutcome(namespace, telemetry.status, relevantQueueError(telemetry, namespace.activeRun));
             finishRun(namespace, runStatusFrom(namespace, telemetry), now, telemetry);
@@ -5589,13 +5756,13 @@ class StatusProPlugin(WAN2GPPlugin):
         return recovered;
     }
 
-    function finishStage(state, id) {
+    function finishStage(state, id, completedAt = Date.now()) {
         if (!id) return;
         const record = state.records[id];
         if (!record || record.state !== "current") return;
         if (record.startedAt) {
             record.elapsed = (Number.isFinite(record.elapsedBase) ? record.elapsedBase : 0) +
-                (Date.now() - record.startedAt) / 1000;
+                Math.max(0, (completedAt - record.startedAt) / 1000);
         }
         record.state = "complete";
         record.progress = 100;
@@ -5762,7 +5929,8 @@ class StatusProPlugin(WAN2GPPlugin):
             activeState.currentId = snapshot.id;
             const next = activeState.records[snapshot.id];
             const recoveredBaseline = next.recovered && next.state === "complete" && Number.isFinite(next.elapsed);
-            const elapsedBase = (recoveredBaseline || (snapshot.id === "input" && next.state === "complete" && Number.isFinite(next.elapsed)))
+            const resumableStage = ["input", "post"].includes(snapshot.id);
+            const elapsedBase = (recoveredBaseline || (resumableStage && next.state === "complete" && Number.isFinite(next.elapsed)))
                 ? next.elapsed
                 : 0;
             next.state = snapshot.aborting ? "aborting" : "current";
@@ -6891,8 +7059,16 @@ class StatusProPlugin(WAN2GPPlugin):
         if (fieldId === "repeats") return run.repeats;
         if (fieldId === "status") return run.status;
         if (fieldId === "outcome") return run.status_reason || run.failure_reason || null;
-        if (fieldId === "started_at") return Number.isFinite(Number(run.started_at)) ? new Date(Number(run.started_at)).toISOString() : null;
-        if (fieldId === "completed_at") return Number.isFinite(Number(run.completed_at)) ? new Date(Number(run.completed_at)).toISOString() : null;
+        if (fieldId === "started_at") {
+            const timestamp = optionalNumber(run.started_at);
+            const date = timestamp === null ? null : new Date(timestamp);
+            return date && Number.isFinite(date.getTime()) ? date.toISOString() : null;
+        }
+        if (fieldId === "completed_at") {
+            const timestamp = optionalNumber(run.completed_at);
+            const date = timestamp === null ? null : new Date(timestamp);
+            return date && Number.isFinite(date.getTime()) ? date.toISOString() : null;
+        }
         if (fieldId === "duration_seconds") return optionalNumber(run.duration_seconds);
         if (fieldId === "generation_time") return optionalNumber(setting(settings, "generation_time"));
         if (fieldId === "phase_timings") return cloneJson(run.stages, {});
@@ -7220,6 +7396,7 @@ class StatusProPlugin(WAN2GPPlugin):
     }
 
     function importStatusProExport(namespace, payload, importedAt = Date.now()) {
+        reconcileRunHistory(namespace);
         if (namespace.runHistory.length) {
             throw new Error("History must be empty before importing. Export anything you want to keep, clear history, then try again.");
         }
@@ -7240,13 +7417,12 @@ class StatusProPlugin(WAN2GPPlugin):
         namespace.historyScope = "all";
         namespace.historyOpen = true;
         namespace.historyRenderKey = null;
-        const result = persistRunHistory(namespace);
-        return {
+        return afterHistoryWrite(persistRunHistory(namespace), result => ({
             requested: runs.length,
             imported: namespace.runHistory.length,
             dropped: result.dropped || 0,
             persisted: result.persisted
-        };
+        }));
     }
 
     function sameExportFields(left, right) {
@@ -7613,7 +7789,13 @@ class StatusProPlugin(WAN2GPPlugin):
             if (!latestTask) return task;
             return (Number(task && task.completedAt) || 0) >= (Number(latestTask.completedAt) || 0) ? task : latestTask;
         }, null);
+        const outcomes = {completed: 0, failed: 0, aborted: 0, incomplete: 0};
+        runs.forEach(run => {
+            const status = run.status === "window" ? "completed" : run.status;
+            outcomes[Object.hasOwn(outcomes, status) ? status : "incomplete"] += Math.max(1, Number(run.repeats) || 1);
+        });
         return {
+            outcomes,
             generationCount: runs.reduce((sum, run) => sum + Math.max(1, Number(run && run.repeats) || 1), 0),
             totalDuration: runs.reduce((sum, run) => sum + (Number(run && run.duration_seconds) || 0), 0),
             latestFinishedAt: Number(latestTask && latestTask.completedAt) || 0,
@@ -7629,14 +7811,17 @@ class StatusProPlugin(WAN2GPPlugin):
         running.hidden = true;
         const sessionRuns = namespace.runHistory.filter(run => namespace.sessionRunIds.has(run.id));
         const completed = namespace.historyRecording !== false && sessionRuns.length > 0;
-        const {generationCount, totalDuration, latestFinishedAt, latestDuration} = sessionCompletionSummary(sessionRuns);
-        text(namespace.panel, "[data-sp-live]", completed ? "Complete" : "Ready");
+        const {generationCount, totalDuration, latestFinishedAt, latestDuration, outcomes} = sessionCompletionSummary(sessionRuns);
+        const allSuccessful = outcomes.completed === generationCount;
+        const outcomeText = Object.entries(outcomes).filter(([, count]) => count > 0)
+            .map(([status, count]) => `${count} ${status}`).join(", ");
+        text(namespace.panel, "[data-sp-live]", completed ? (allSuccessful ? "Complete" : "Queue finished") : "Ready");
         text(namespace.panel, "[data-sp-steps]", "");
         text(namespace.panel, "[data-sp-overall]", completed ? `${formatDuration(latestDuration)}` : "");
         text(namespace.panel, "[data-sp-eta]", "");
-        text(namespace.panel, "[data-sp-idle-title]", completed ? "All generations complete" : "Ready to generate");
+        text(namespace.panel, "[data-sp-idle-title]", completed ? (allSuccessful ? "All generations complete" : "Queue finished") : "Ready to generate");
         text(namespace.panel, "[data-sp-idle-message]", completed
-            ? `${generationCount} generation${generationCount === 1 ? "" : "s"}${sessionRuns.length !== generationCount ? ` across ${sessionRuns.length} queued runs` : ""} completed in ${formatDuration(totalDuration)}. Most recent generation finished at ${formatClock(latestFinishedAt)}.`
+            ? `${outcomeText} in ${formatDuration(totalDuration)}. Most recent run finished at ${formatClock(latestFinishedAt)}.`
             : namespace.historyRecording === false
                 ? "Live generation timing will appear here. Automatic history recording is off."
             : (namespace.runHistory.length
@@ -8040,13 +8225,19 @@ class StatusProPlugin(WAN2GPPlugin):
         namespace.panel.hidden = !active;
     }
 
-    function tick(namespace) {
-        if (!namespace.host.isConnected || !namespace.source.isConnected) return;
-        observeRunOutcome(namespace, visibleFailureNotice(namespace));
-        syncRunTelemetry(namespace);
-        observeRunOutcome(namespace, visibleFailureNotice(namespace));
-        readGalleryNavigationResult(namespace);
-        readDownloadSnapshot(namespace);
+    function readLiveSnapshot(namespace) {
+        const telemetry = namespace.runTelemetry;
+        const downloading = namespace.download && namespace.download.active;
+        const lifecycle = telemetry && telemetry.model_lifecycle;
+        // Native status text and progress widgets can survive a stopped queue.
+        // Only explicit idle telemetry overrides them; keep the DOM fallback
+        // when the bridge is unavailable, and preserve independent asset work.
+        if (telemetry && telemetry.in_progress === false && !telemetry.active_task &&
+            !downloading) {
+            return lifecycle && lifecycle.state === "unloading"
+                ? modelLifecycleSnapshot(namespace)
+                : null;
+        }
         let snapshot = readPrepareStatus(namespace) || readReportedPreGenerationStatus(namespace) || readSnapshot(namespace);
         snapshot = reinterpretQwenSilentEncode(namespace, snapshot);
         if (!snapshot && namespace.download && namespace.download.visible &&
@@ -8064,6 +8255,17 @@ class StatusProPlugin(WAN2GPPlugin):
                 textOnly: true
             };
         }
+        return snapshot;
+    }
+
+    function tick(namespace) {
+        if (!namespace.host.isConnected || !namespace.source.isConnected) return;
+        observeRunOutcome(namespace, visibleFailureNotice(namespace));
+        syncRunTelemetry(namespace);
+        observeRunOutcome(namespace, visibleFailureNotice(namespace));
+        readGalleryNavigationResult(namespace);
+        readDownloadSnapshot(namespace);
+        const snapshot = readLiveSnapshot(namespace);
         if (snapshot) {
             observeRunOutcome(namespace, snapshot.rawName, snapshot.rawMessage);
             recoverMissedPerformanceStages(namespace, snapshot);
@@ -8115,6 +8317,7 @@ class StatusProPlugin(WAN2GPPlugin):
         installStyle(root);
         const previous = window[NAMESPACE];
         if (previous && previous.timer) window.clearInterval(previous.timer);
+        if (previous && previous.storageHandler) window.removeEventListener("storage", previous.storageHandler);
         if (previous && previous.exportResizeHandler) window.removeEventListener("resize", previous.exportResizeHandler);
         if (previous && previous.resumeHandler) {
             document.removeEventListener("visibilitychange", previous.resumeHandler);
@@ -8147,6 +8350,8 @@ class StatusProPlugin(WAN2GPPlugin):
             qwenEncodeFallbackStartedAt: 0,
             activeRun: null,
             runHistory,
+            historyBaseline: runHistory.map(run => stripRunPrompts(cloneJson(run, {}))),
+            historyBaselineMode: historyPersistence,
             historyPersistence,
             historyRecording,
             promptMemory,
@@ -8331,7 +8536,7 @@ class StatusProPlugin(WAN2GPPlugin):
                     } catch (_) {
                         throw new Error("The selected file is not valid JSON.");
                     }
-                    const result = importStatusProExport(namespace, payload);
+                    const result = await importStatusProExport(namespace, payload);
                     if (namespace.activeRun) render(namespace);
                     else renderIdle(namespace);
                     const storageNote = result.persisted
@@ -8543,7 +8748,7 @@ class StatusProPlugin(WAN2GPPlugin):
         }
         const confirmExport = panel.querySelector("[data-sp-export-confirm]");
         if (confirmExport) {
-            confirmExport.addEventListener("click", () => {
+            confirmExport.addEventListener("click", async () => {
                 const settings = modalSettings(namespace);
                 const fields = selectedExportFieldsFromModal(namespace);
                 if (!fields.size) return;
@@ -8553,7 +8758,7 @@ class StatusProPlugin(WAN2GPPlugin):
                 if (nextHistory !== namespace.historyPersistence && !window.confirm(historyPersistenceConfirmation(nextHistory))) return;
                 if (!settings.promptMemory && namespace.promptMemory !== false &&
                     !window.confirm("Turn off page-session prompt memory?\n\nPrompt text currently held by Status Pro will be removed, and future prompts will not be available in History exports until this setting is turned on again.")) return;
-                if (nextHistory !== namespace.historyPersistence && !setHistoryPersistence(namespace, nextHistory)) {
+                if (nextHistory !== namespace.historyPersistence && !await setHistoryPersistence(namespace, nextHistory)) {
                     window.alert(namespace.historyStorageNotice || "Status Pro could not change the history storage setting.");
                     return;
                 }
@@ -8622,6 +8827,14 @@ class StatusProPlugin(WAN2GPPlugin):
         };
         document.addEventListener("visibilitychange", namespace.resumeHandler);
         window.addEventListener("focus", namespace.resumeHandler);
+        namespace.storageHandler = event => {
+            if (namespace.historyPersistence === "browser") return;
+            if (event.key !== null && event.key !== runHistoryKey(namespace.historyPersistence)) return;
+            reconcileRunHistory(namespace);
+            if (namespace.activeRun) render(namespace);
+            else renderIdle(namespace);
+        };
+        window.addEventListener("storage", namespace.storageHandler);
         namespace.timer = window.setInterval(() => tick(namespace), TICK_MS);
         tick(namespace);
         console.info("[Status Pro] Progress timeline initialized");

@@ -165,6 +165,190 @@ class ReleaseSmokeTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_stopped_queue_ignores_lingering_abort_and_progress(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is required for queue-status regression validation")
+        javascript = _javascript_with_exports("readLiveSnapshot")
+        test_script = r'''
+const {readLiveSnapshot} = globalThis.__statusProReleaseTest;
+const namespace = {
+  state: {currentId: null, overallElapsed: null, steps: {}, records: {}},
+  source: {querySelector: () => ({value: "Aborting"}), querySelectorAll: () => []},
+  download: {active: false, visible: false},
+  runTelemetry: {in_progress: true, active_task: {id: 1}, status: "Aborting"}
+};
+function check(condition, message) { if (!condition) throw new Error(message); }
+check(readLiveSnapshot(namespace).aborting, "active abort must remain visible");
+namespace.runTelemetry = {in_progress: false, active_task: null, status: "Aborting", queue_length: 0};
+for (let tick = 0; tick < 5; tick++) {
+  check(readLiveSnapshot(namespace) === null, "stopped queue revived Prepare");
+}
+namespace.runTelemetry.status = "";
+check(readLiveSnapshot(namespace) === null, "stale DOM abort revived Prepare");
+namespace.download.visible = true;
+namespace.state.currentId = "prepare";
+check(readLiveSnapshot(namespace) === null, "completed download revived Prepare");
+namespace.runTelemetry.model_lifecycle = {state: "unloaded"};
+check(readLiveSnapshot(namespace) === null, "completed unload revived Prepare");
+namespace.runTelemetry.model_lifecycle = {state: "unloading"};
+check(readLiveSnapshot(namespace).activity === "unload", "live unload was hidden");
+namespace.runTelemetry.model_lifecycle = null;
+namespace.download.active = true;
+namespace.source.querySelector = () => null;
+check(readLiveSnapshot(namespace).rawName === "Downloading model files", "live download was hidden");
+namespace.download.active = false;
+namespace.runTelemetry = {in_progress: true, active_task: {id: 2}, status: "Loading model"};
+check(readLiveSnapshot(namespace).rawName === "Loading model", "next queued run was hidden");
+namespace.runTelemetry = null;
+namespace.source.querySelector = () => ({value: "Aborting"});
+check(readLiveSnapshot(namespace).aborting, "missing telemetry disabled DOM fallback");
+'''
+        result = subprocess.run(
+            [node, "-"], input=javascript + "\n" + test_script,
+            text=True, encoding="utf-8", capture_output=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_review_telemetry_resource_and_export_regressions(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is required for lifecycle regression validation")
+        javascript = _javascript_with_exports(
+            "syncRunTelemetry", "startRun", "freshState", "observePerformanceTelemetry",
+            "exportFieldValue", "normalizeImportedExport", "renderIdle",
+        )
+        test_script = r'''
+const api = globalThis.__statusProReleaseTest;
+const assert = (condition, message) => {if (!condition) throw new Error(message);};
+globalThis.window = {localStorage: {getItem: () => null, setItem: () => {}}};
+const ns = {
+  state: api.freshState(), source: {querySelector: () => null},
+  container: {querySelector: () => null}, historyRecording: false,
+  runHistory: [], sessionRunIds: new Set(), historyOpen: false,
+};
+const task = {id: 1, settings: {}};
+api.startRun(ns, task, {server_time: 1, in_progress: true, active_task: task});
+const originalRun = ns.activeRun;
+for (const telemetry of [
+  {server_time: 2, error: "temporary snapshot failure"},
+  {server_time: 2}, {server_time: 2, in_progress: true, active_task: null},
+  {server_time: 2, in_progress: false, error: "snapshot failure"},
+]) {
+  ns.runTelemetry = telemetry;
+  api.syncRunTelemetry(ns);
+  assert(ns.activeRun === originalRun, "incomplete telemetry closed the active run");
+}
+ns.runTelemetry = {server_time: 3, in_progress: true, active_task: task};
+api.syncRunTelemetry(ns);
+assert(ns.activeRun === originalRun, "telemetry recovery split the run");
+ns.runTelemetry = {server_time: 4, in_progress: false, active_task: null};
+api.syncRunTelemetry(ns);
+assert(ns.activeRun === null, "valid completion did not finish the run");
+const run = {queue_task_id: 1, started_at: 0};
+const telemetry = {resource_sample: {sampled_at: 2, ram_rss_bytes: 200},
+  performance: {id: "p", task_id: 1, steps: [{sequence: 1, completed_at: 1,
+    memory: {sampled_at: 1, ram_rss_bytes: 100}}]}};
+api.observePerformanceTelemetry(run, telemetry);
+api.observePerformanceTelemetry(run, telemetry);
+telemetry.resource_sample = {sampled_at: 3, ram_rss_bytes: 400};
+api.observePerformanceTelemetry(run, telemetry);
+assert(run.resources.sample_count === 2, "periodic sample was counted twice");
+assert(run.resources.metrics.ram_rss_bytes.average_bytes === 300, "wrong memory average");
+assert(run.step_performance.length === 1, "step observation duplicated");
+const imported = api.normalizeImportedExport({version: "1", runs: [{status: "completed"}]})[0];
+for (const field of ["started_at", "completed_at"]) {
+  assert(api.exportFieldValue(imported, field, new Set()) === null, "missing imported date became epoch");
+  for (const value of [null, undefined, "", 1e20]) {
+    assert(api.exportFieldValue({[field]: value}, field, new Set()) === null, "invalid date exported");
+  }
+  assert(api.exportFieldValue({[field]: 0}, field, new Set()) === "1970-01-01T00:00:00.000Z", "valid epoch rejected");
+}
+const elements = new Map();
+ns.panel = {querySelector: key => {
+  if (["[data-sp-idle]", "[data-sp-running]", "[data-sp-live]", "[data-sp-idle-title]", "[data-sp-idle-message]"]
+      .includes(key)) {if (!elements.has(key)) elements.set(key, {}); return elements.get(key);}
+  return null;
+}};
+ns.historyRecording = true;
+for (const status of ["failed", "aborted", "completed"]) {
+  ns.runHistory = [{id: "r", status, started_at: 1000, completed_at: 5000, duration_seconds: 4}];
+  ns.sessionRunIds = new Set(["r"]);
+  api.renderIdle(ns);
+  assert(elements.get("[data-sp-idle-message]").textContent.includes(`1 ${status}`), "outcome missing from banner");
+  assert(elements.get("[data-sp-live]").textContent === (status === "completed" ? "Complete" : "Queue finished"), "misleading completion headline");
+}
+'''
+        result = subprocess.run([node, "-"], input=javascript + "\n" + test_script,
+                                text=True, encoding="utf-8", capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_shared_history_reconciles_deletions_and_serializes_writes(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is required for shared-history validation")
+        javascript = _javascript_with_exports("persistRunHistory", "reconcileRunHistory", "setHistoryPersistence")
+        test_script = r'''
+(async () => {
+const api = globalThis.__statusProReleaseTest;
+const assert = (condition, message) => {if (!condition) throw new Error(message);};
+const values = new Map();
+const storage = {getItem: k => values.get(k) ?? null, setItem: (k, v) => values.set(k, v), removeItem: k => values.delete(k)};
+let tail = Promise.resolve();
+let lockCalls = 0;
+globalThis.window = {localStorage: storage, sessionStorage: storage, navigator: {locks: {
+  request: (key, callback) => {lockCalls++; const result = tail.then(callback); tail = result.catch(() => {}); return result;}
+}}};
+const clone = value => JSON.parse(JSON.stringify(value));
+const record = (id, time = 1) => ({id, status: "completed", imported: true, completed_at: time, settings: {}, output_records: []});
+const tab = (runs, mode) => ({runHistory: clone(runs), historyBaseline: clone(runs), historyBaselineMode: mode,
+  historyPersistence: mode, sessionRunIds: new Set(runs.map(r => r.id)), selectedRunIds: new Set(runs.map(r => r.id)),
+  recoverablePrompts: new Map(runs.map(r => [r.id, {}])), openHistoryRuns: new Set(runs.map(r => r.id))});
+for (const mode of ["persistent", "runtime"]) {
+  values.clear();
+  const seed = tab([], mode);
+  seed.runHistory = [record("old")];
+  await api.persistRunHistory(seed);
+  const a = tab(seed.runHistory, mode), b = tab(seed.runHistory, mode);
+  a.runHistory = [];
+  await api.persistRunHistory(a);
+  b.runHistory.unshift(record("new", 2));
+  await api.persistRunHistory(b);
+  assert(b.runHistory.map(r => r.id).join() === "new", "stale tab resurrected deleted history");
+  assert(!b.selectedRunIds.has("old") && !b.recoverablePrompts.has("old"), "deleted row retained references");
+  api.reconcileRunHistory(a);
+  assert(a.runHistory[0].id === "new", "remote insertion did not synchronize");
+  const c = tab(a.runHistory, mode), d = tab(a.runHistory, mode);
+  c.runHistory.unshift(record("c", 3));
+  d.runHistory.unshift(record("d", 4));
+  await Promise.all([api.persistRunHistory(c), api.persistRunHistory(d)]);
+  api.reconcileRunHistory(c);
+  assert(c.runHistory.map(r => r.id).sort().join() === "c,d,new", "simultaneous saves lost a record");
+  d.runHistory = d.runHistory.filter(r => r.id !== "new");
+  await api.persistRunHistory(d);
+  c.runHistory.unshift(record("e", 5));
+  await api.persistRunHistory(c);
+  assert(!c.runHistory.some(r => r.id === "new"), "selected deletion was undone");
+}
+assert(lockCalls > 0, "shared writes bypassed browser lock");
+values.clear();
+const session = tab([], "browser");
+session.runHistory = [record("private")];
+const callsBefore = lockCalls;
+const result = api.persistRunHistory(session);
+assert(result.persisted && lockCalls === callsBefore, "tab-local history used shared synchronization");
+assert(await api.setHistoryPersistence(session, "persistent"), "asynchronous mode switch failed");
+assert(session.historyPersistence === "persistent", "wrong mode after switch");
+window.navigator.locks.request = () => Promise.reject(new Error("unavailable"));
+session.runHistory.unshift(record("unsaved"));
+const failed = await api.persistRunHistory(session);
+assert(!failed.persisted && session.runHistory.some(r => r.id === "unsaved"), "lock failure discarded in-memory history");
+})().catch(error => {console.error(error); process.exitCode = 1;});
+'''
+        result = subprocess.run([node, "-"], input=javascript + "\n" + test_script,
+                                text=True, encoding="utf-8", capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_export_field_tooltips_cover_every_group_and_option(self):
         node = shutil.which("node")
         if not node:
@@ -1343,6 +1527,8 @@ const phaseCases = {
   "Decoding H3 stereo audio": "decode",
   "Upsampling - PiD": "post",
   "Applying SeedVC": "post",
+  "Distilled refinement": "post",
+  "Window 1 / 2 - Distilled refinement": "post",
   "Saving output": "save",
   "Muxing audio": "save"
 };
@@ -1392,6 +1578,23 @@ if (Math.abs(namespace.state.records.input.elapsed - 5) > 0.001) {
 const inputActivities = api.stageActivities(namespace.state, namespace.state.records.input);
 if (inputActivities.length !== 2 || inputActivities[0].label !== "Preparing control video" || inputActivities[1].label !== "VAE Encoding") {
   throw new Error("Inputs activity history was not preserved across Encode");
+}
+
+clock = 1000;
+Date.now = () => clock;
+namespace = {state: api.freshState(), activeRun: {}};
+const postStarting = {...snapshot("post"), rawName: "Upsampling - Starting", rawMessage: "Upsampling - Starting"};
+const postRefining = {...snapshot("post"), rawName: "Distilled refinement", rawMessage: "Distilled refinement"};
+api.applySnapshot(namespace, postStarting);
+clock = 3000;
+api.applySnapshot(namespace, snapshot("input"));
+clock = 5000;
+api.applySnapshot(namespace, postRefining);
+clock = 8000;
+api.applySnapshot(namespace, postRefining);
+Date.now = originalNow;
+if (namespace.state.currentId !== "post" || Math.abs(namespace.state.records.post.elapsed - 5) > 0.001) {
+  throw new Error(`LTX refinement did not resume Enhance timing: ${JSON.stringify(namespace.state.records.post)}`);
 }
 
 namespace = {state: api.freshState(), activeRun: {}};
@@ -1587,6 +1790,106 @@ if (!csv.includes('"queue_task_id"')) throw new Error("CSV transformation failed
 const markdown = api.exportMarkdown(shareRecords, shareFields, {scope: "all", preset: "Share-safe"});
 if (!markdown.includes("# Status Pro generation history")) throw new Error("Markdown transformation failed");
 JSON.parse(JSON.stringify({runs: shareRecords}));
+'''
+        result = subprocess.run(
+            [node, "-"],
+            input=javascript + "\n" + test_script,
+            text=True,
+            encoding="utf-8",
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_backgrounded_completion_uses_wangp_end_time(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is required for background completion validation")
+        javascript = _javascript_with_exports(
+            "inferredRunCompletionTime",
+            "repairBackgroundCompletionTiming",
+            "finishStage",
+            "finishPhase",
+        )
+        test_script = r'''
+globalThis.window = {
+  localStorage: { getItem() { return null; }, setItem() {} },
+  sessionStorage: { getItem() { return null; }, setItem() {} }
+};
+const api = globalThis.__statusProReleaseTest;
+const startedAt = 1700000000000;
+const actualDuration = 14 * 60 + 36;
+const resumedAt = startedAt + actualDuration * 1000 + 90 * 60 * 1000;
+const baseRun = {started_at: startedAt, total_windows: null};
+
+const statusEnded = api.inferredRunCompletionTime(
+  baseRun,
+  {active_task: null, status: "Total Generation Time: 14m 36s"},
+  resumedAt,
+  []
+);
+if (statusEnded !== startedAt + actualDuration * 1000) {
+  throw new Error(`WanGP total duration did not remove the minimized gap: ${statusEnded}`);
+}
+
+const outputRecord = {
+  path: "outputs/result.mp4",
+  settings: {creation_timestamp: (startedAt + actualDuration * 1000) / 1000, generation_time: actualDuration}
+};
+const outputEnded = api.inferredRunCompletionTime(baseRun, {status: ""}, resumedAt, [outputRecord]);
+if (outputEnded !== startedAt + actualDuration * 1000) {
+  throw new Error("output creation timestamp was not used as the completion fallback");
+}
+const multiTaskStatusEnded = api.inferredRunCompletionTime(
+  baseRun,
+  {active_task: null, status: "Total Generation Time: 44m 36s"},
+  resumedAt,
+  [outputRecord]
+);
+if (multiTaskStatusEnded !== startedAt + actualDuration * 1000) {
+  throw new Error("a queue-wide duration overrode the task's output completion timestamp");
+}
+
+const inheritedTimestampRecord = {
+  path: "outputs/result_post.mp4",
+  settings: {creation_timestamp: startedAt / 1000 - 3600, generation_time: actualDuration}
+};
+const postEnded = api.inferredRunCompletionTime(baseRun, {status: ""}, resumedAt, [inheritedTimestampRecord]);
+if (postEnded !== startedAt + actualDuration * 1000) {
+  throw new Error("late post-processing did not fall back to its operation duration");
+}
+
+const retained = {
+  status: "completed",
+  started_at: startedAt,
+  completed_at: resumedAt,
+  duration_seconds: (resumedAt - startedAt) / 1000,
+  settings: {generation_time: actualDuration},
+  output_records: [outputRecord],
+  stages: {decode: {label: "Decode", stage: "decode", status: "complete", duration_seconds: 5400}}
+};
+if (!api.repairBackgroundCompletionTiming(retained)) throw new Error("retained minimized record was not repaired");
+if (retained.completed_at !== startedAt + actualDuration * 1000 || retained.duration_seconds !== actualDuration) {
+  throw new Error(`retained completion repair is incorrect: ${JSON.stringify(retained)}`);
+}
+if (!retained.stages.decode.unreported || "duration_seconds" in retained.stages.decode) {
+  throw new Error("an impossible background-inflated stage duration was retained");
+}
+
+const state = {
+  history: {},
+  records: {decode: {
+    id: "decode", state: "current", startedAt: startedAt + 800000,
+    elapsedBase: 0, elapsed: null, progress: null, eta: null, stepTotal: null
+  }},
+  phases: {decodePhase: {state: "current", startedAt: startedAt + 800000}},
+  currentPhaseId: "decodePhase"
+};
+api.finishStage(state, "decode", startedAt + actualDuration * 1000);
+api.finishPhase(state, startedAt + actualDuration * 1000);
+if (state.records.decode.elapsed !== 76 || state.phases.decodePhase.elapsed !== 76) {
+  throw new Error("stage completion still included browser-resume idle time");
+}
 '''
         result = subprocess.run(
             [node, "-"],

@@ -1,19 +1,20 @@
 # Status Pro v1.0.6
 
-Status Pro 1.0.6 makes Status Pro and Status Lite safe to install together while retaining the post-processing accuracy improvements from 1.0.5. It observes WanGP's existing generation process and does not change model output or generation behaviour.
+Status Pro 1.0.6 improves queue completion, background timing, history reliability, and coexistence with Status Lite. It observes WanGP's existing generation process and does not change model output or generation behaviour.
 
-## What's new
+## What's new since 1.0.5
 
+- A stopped queue no longer revives an endless Prepare stage from lingering abort text or completed asset activity. Active downloads and model unloading remain visible.
+- Temporary or incomplete telemetry snapshots no longer close an active generation's history record.
+- Shared history reconciles changes and deletions across browser tabs, with serialized writes when the browser supports Web Locks. Tab-local history remains independent.
+- Queue completion banners distinguish completed, failed, aborted, and incomplete runs.
+- Per-step memory observations no longer cause periodic samples to be counted twice in memory averages.
+- Missing or invalid export timestamps remain empty instead of becoming January 1970 dates.
+- A run completed while the browser is minimized now ends at WanGP's reported queue completion or output creation time, excluding any later idle gap before the window is restored.
+- Affected retained records are repaired from their output metadata when possible, and impossible background-inflated stage timings are labelled unreported.
+- Gallery-applied LTX `Distilled refinement` now remains in Enhance and carries forward the preceding upsampling-start time after Inputs and Encode.
 - When both Status editions are enabled, Status Pro takes precedence and Status Lite remains dormant. This prevents duplicate callback/download observers and competing status panels.
 - Both editions resolve WanGP's native status component independently of plugin insertion order.
-- Standalone gallery post-processing records the LTX 2.3 or 2.5 upscaler as the effective model instead of inheriting the generation model selected in WanGP.
-- Inline post-processing preserves the original generation model and adds a separate `Post:` summary describing temporal upsampling, spatial upscaling, and film grain.
-- Live LTX stages identify the resolved LTX transformer, Gemma text encoder, and LTX video/audio VAEs. Accurate role labels replace stale H3/Qwen details if WanGP does not expose an exact filename.
-- LTX's own progress callbacks provide all eight refinement observations per internal subwindow. Subwindows remain labelled phases within one task, such as `Window 1 / 2` and `Window 2 / 2`.
-- Step observers are bound to their WanGP queue task, preventing the previous task's final callback from leaking into the next record.
-- Impossible inherited generation-time values are discarded, while plausible WanGP timing remains available.
-- Generate and LTX refinement details missed while the WanGP window is minimized are recovered from retained server-side callbacks when the page resumes or the run completes.
-- Existing retained and imported gallery-LTX records are normalized when loaded, including model identity, component metadata, step totals, and structured post-processing details.
 
 ## Privacy and retention
 
