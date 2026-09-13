@@ -1020,6 +1020,7 @@ class StatusProPlugin(WAN2GPPlugin):
             "audio_gallery_refresh_trigger",
         ):
             self.request_component(component_id)
+        self.request_global("WanGP_version")
         self.request_global("get_model_name")
         self.request_global("get_model_family")
         self.request_global("families_infos")
@@ -1286,6 +1287,7 @@ class StatusProPlugin(WAN2GPPlugin):
             payload = {
                 "server_time": time.time(),
                 "runtime_id": self._runtime_id,
+                "wangp_version": str(getattr(self, "WanGP_version", "") or "").strip() or None,
                 "in_progress": bool(gen.get("in_progress")),
                 "queue_length": len(queue),
                 "queue_task_ids": [_telemetry_value(task.get("id")) for task in queue if isinstance(task, dict)],
@@ -1831,6 +1833,7 @@ class StatusProPlugin(WAN2GPPlugin):
         { id: "completed_at", label: "Completed time", group: "Timing" },
         { id: "duration_seconds", label: "Total wall-clock time", group: "Timing" },
         { id: "generation_time", label: "Wan2GP generation time", group: "Timing" },
+        { id: "wangp_version", label: "WanGP version", group: "Run" },
         { id: "phase_timings", label: "Phase and stage timings", group: "Timing" },
         { id: "step_performance", label: "Per-step performance", group: "Performance" },
         { id: "resource_usage", label: "RAM / VRAM usage", group: "Performance" },
@@ -1879,6 +1882,7 @@ class StatusProPlugin(WAN2GPPlugin):
         completed_at: "The date and time at which the run finished.",
         duration_seconds: "Total elapsed time from the start of the run to its finish.",
         generation_time: "Generation duration reported directly by WanGP.",
+        wangp_version: "WanGP version reported by the application when this run was recorded.",
         phase_timings: "Durations for observed phases such as loading, encoding, generating, and decoding.",
         step_performance: "Individual step durations, pass numbers, skips, and memory samples.",
         resource_usage: "Observed process RAM and GPU memory averages and peaks.",
@@ -4590,7 +4594,12 @@ class StatusProPlugin(WAN2GPPlugin):
             const record = state.phases[id];
             if (!record || record.state === "pending" || !Number.isFinite(record.elapsed)) return;
             stages[id] = {
-                label: record.label,
+                label: historyPhaseLabel(record.label),
+                raw_label: record.label,
+                current: optionalNumber(record.current),
+                total: optionalNumber(record.total),
+                unit: record.unit || null,
+                progress: optionalNumber(record.progress),
                 duration_seconds: Math.round(record.elapsed * 10) / 10,
                 status: record.state === "aborting" ? "aborted" : record.state,
                 stage: record.stage
@@ -5291,6 +5300,7 @@ class StatusProPlugin(WAN2GPPlugin):
         namespace.activeRun = {
             id: `${namespace.sessionId}-${runTaskKey(task) || "observed"}-${Math.round(now)}`,
             session_id: namespace.sessionId,
+            wangp_version: telemetry && telemetry.wangp_version || null,
             queue_task_id: task && task.id !== undefined ? task.id : null,
             client_id: String(task && task.client_id || ""),
             status: "running",
@@ -5332,6 +5342,7 @@ class StatusProPlugin(WAN2GPPlugin):
             namespace.activeRun.window_prompt = windowPrompt;
             namespace.activeRun.settings.prompt = namespace.activeRun.window_prompt;
         }
+        if (telemetry && telemetry.wangp_version) namespace.activeRun.wangp_version = String(telemetry.wangp_version);
         namespace.activeRun.repeats = optionalNumber(task.repeats) || namespace.activeRun.repeats || 1;
         const window = windowDetails(telemetry);
         if (!Number.isFinite(namespace.activeRun.window_no) && Number.isFinite(window.number)) {
@@ -5339,6 +5350,22 @@ class StatusProPlugin(WAN2GPPlugin):
         }
         if (Number.isFinite(window.total)) namespace.activeRun.total_windows = window.total;
         observePerformanceTelemetry(namespace.activeRun, telemetry);
+    }
+
+    function finishHistoryPhases(state, outcome, completedAt) {
+        if (["completed", "window"].includes(outcome)) {
+            finishStage(state, state.currentId, completedAt);
+            finishPhase(state, completedAt);
+            return;
+        }
+        const stage = state.records[state.currentId];
+        const phase = state.phases[state.currentPhaseId];
+        for (const record of [stage, phase]) {
+            if (!record || !["current", "aborting"].includes(record.state)) continue;
+            record.elapsed = (record === stage ? (record.elapsedBase || 0) : 0) +
+                Math.max(0, (completedAt - record.startedAt) / 1000);
+            record.state = outcome === "aborted" ? "aborting" : outcome;
+        }
     }
 
     function finishRun(namespace, status, completedAt, telemetry, outputEnd) {
@@ -5355,10 +5382,12 @@ class StatusProPlugin(WAN2GPPlugin):
             ? Math.min(Math.max(outputStart, Math.floor(outputEnd)), outputRecords.length)
             : outputRecords.length;
         const completedOutputRecords = outputRecords.slice(outputStart, outputLimit);
-        const ended = inferredRunCompletionTime(run, telemetrySnapshot, observedEnded, completedOutputRecords);
+        const outcome = run.outcome_status || status || "completed";
+        const unsuccessful = !["completed", "window"].includes(outcome) ||
+            (outcome === "completed" && completedOutputRecords.length === 0);
+        const ended = unsuccessful ? observedEnded : inferredRunCompletionTime(run, telemetrySnapshot, observedEnded, completedOutputRecords);
         const browserStageEnded = Date.now() - Math.max(0, bridgeObservedAt - ended);
-        finishStage(namespace.state, namespace.state.currentId, browserStageEnded);
-        finishPhase(namespace.state, browserStageEnded);
+        finishHistoryPhases(namespace.state, unsuccessful ? (outcome === "completed" ? "failed" : outcome) : outcome, browserStageEnded);
         run.completed_at = ended;
         run.duration_seconds = Math.max(0, Math.round((ended - run.started_at) / 100) / 10);
         run.stages = stageDurations(namespace.state);
@@ -6521,24 +6550,63 @@ class StatusProPlugin(WAN2GPPlugin):
         container.appendChild(wrapper);
     }
 
+    function historyPhaseLabel(value) {
+        const label = String(value || "Stage").trim();
+        // Only remove a file/path payload following an explicit saving label.
+        const match = label.match(/^(Saving\s+File)(?:\s*[:—-]\s*|\s+)(.+)$/i);
+        if (match && /(?:[\\/]|\.(?:mp4|webm|mov|mkv|avi|png|jpe?g|webp|gif|wav|mp3|flac|ogg|safetensors)(?:$|[\s"']))/i.test(match[2])) {
+            return "Saving File";
+        }
+        return label;
+    }
+
+    function recordedPhaseStage(key, phase) {
+        const explicit = phase.stage === "enhance" ? "post" : phase.stage;
+        if (STAGE_DEFS.some(stage => stage.id === explicit)) return explicit;
+        const prefix = String(key || "").split(":")[0];
+        if (STAGE_DEFS.some(stage => stage.id === prefix)) return prefix;
+        return stageIdFor(phase.raw_label || phase.label || prefix);
+    }
+
+    function recordedPhaseEntries(phases) {
+        const entries = Object.entries(phases || {}).filter(([, phase]) => phase && typeof phase === "object");
+        const seenIds = new Set(), seenObjects = new Set();
+        return entries.filter(([key, phase]) => {
+            // Some older imports carry a parent stage total alongside its phases.
+            const definition = STAGE_DEFS.find(stage => stage.id === key);
+            const label = String(phase.label || "").toLowerCase();
+            const parent = definition && (!label || label === key || label === definition.label.toLowerCase());
+            if (parent && entries.some(([otherKey, other]) => otherKey !== key &&
+                otherKey.includes(":") && recordedPhaseStage(otherKey, other) === key &&
+                optionalNumber(other.duration_seconds) !== null)) return false;
+            if (seenObjects.has(phase) || (phase.id && seenIds.has(phase.id))) return false;
+            seenObjects.add(phase);
+            if (phase.id) seenIds.add(phase.id);
+            return true;
+        });
+    }
+
+    function aggregateStageDurations(phases) {
+        const totals = Object.fromEntries(STAGE_DEFS.map(stage => [stage.id, 0]));
+        recordedPhaseEntries(phases).forEach(([key, phase]) => {
+            const duration = optionalNumber(phase.duration_seconds);
+            if (duration !== null && duration >= 0) totals[recordedPhaseStage(key, phase)] += duration;
+        });
+        return totals;
+    }
+
     function timingStageId(value, label = "") {
-        const source = `${String(value || "")} ${String(label || "")}`.toLowerCase();
-        if (/input|control|preprocess/.test(source)) return "input";
-        if (/prepare|setup|load|model/.test(source)) return "prepare";
-        if (/encode|prompt|text/.test(source)) return "encode";
-        if (/denois|generat|sampl/.test(source)) return "denoise";
-        if (/decode|vae/.test(source)) return "decode";
-        if (/enhance|upscal|post|interpol/.test(source)) return "enhance";
-        if (/save|mux|output/.test(source)) return "save";
-        return "unaccounted";
+        if (value === "unaccounted") return "unaccounted";
+        const stage = recordedPhaseStage(value, {stage: value, label});
+        return stage === "post" ? "enhance" : stage;
     }
 
     function timingOverviewSegments(run) {
-        const segments = Object.entries(run.stages || {})
+        const segments = recordedPhaseEntries(run.stages)
             .map(([key, stage]) => ({
-                stage: timingStageId(stage && stage.stage || String(key).split(":")[0], stage && stage.label),
-                label: String(stage && stage.label || "Stage"),
-                seconds: optionalNumber(stage && stage.duration_seconds)
+                stage: timingStageId(recordedPhaseStage(key, stage)),
+                label: historyPhaseLabel(stage.label),
+                seconds: optionalNumber(stage.duration_seconds)
             }))
             .filter(segment => Number.isFinite(segment.seconds) && segment.seconds > 0);
         const observed = segments.reduce((sum, segment) => sum + segment.seconds, 0);
@@ -6546,6 +6614,29 @@ class StatusProPlugin(WAN2GPPlugin):
         const unaccounted = Number.isFinite(wall) ? Math.max(0, wall - observed) : 0;
         if (unaccounted >= 0.5) segments.push({stage: "unaccounted", label: "Unaccounted", seconds: unaccounted});
         return segments;
+    }
+
+    function appendPipelineTiming(body, run) {
+        const totals = aggregateStageDurations(run.stages);
+        const label = document.createElement("span");
+        label.className = "status-pro__timing-overview-label";
+        label.textContent = "Pipeline timing";
+        const chips = document.createElement("div");
+        chips.className = "status-pro__stage-breakdown";
+        STAGE_DEFS.forEach(stage => {
+            const chip = document.createElement("span");
+            chip.dataset.stage = timingStageId(stage.id);
+            chip.textContent = `${stage.label}: ${totals[stage.id] > 0 ? formatDuration(totals[stage.id]) : "—"}`;
+            chips.appendChild(chip);
+        });
+        body.append(label, chips);
+    }
+
+    function historyPhaseChipText(stage) {
+        const duration = stage.preloaded ? "Preloaded" : stage.unreported ? "Not reported" :
+            Number.isFinite(optionalNumber(stage.duration_seconds)) ? formatDuration(Number(stage.duration_seconds)) : "—";
+        const counter = formatCounter({current: optionalNumber(stage.current), total: optionalNumber(stage.total), unit: stage.unit});
+        return `${historyPhaseLabel(stage.label)}${counter ? ` · ${counter}` : ""} · ${duration}`;
     }
 
     function appendTimingOverview(body, run) {
@@ -6856,6 +6947,7 @@ class StatusProPlugin(WAN2GPPlugin):
             const fields = document.createElement("dl");
             fields.className = "status-pro__run-fields";
             const settings = run.settings || {};
+            addRunField(fields, "WanGP version", run.wangp_version ? `WanGP ${run.wangp_version}` : null);
             addRunField(fields, "Started", formatDateTime(Number(run.started_at)));
             addRunField(fields, "Completed", formatDateTime(Number(run.completed_at)));
             if (imported) {
@@ -6970,17 +7062,15 @@ class StatusProPlugin(WAN2GPPlugin):
                 body.appendChild(outputActions);
             }
 
+            appendPipelineTiming(body, run);
             const timingSegments = appendTimingOverview(body, run);
             const stages = document.createElement("div");
             stages.className = "status-pro__stage-breakdown";
-            Object.values(run.stages || {}).forEach(stage => {
-                if (Number(stage && stage.duration_seconds) < 1 && !stage.preloaded && !stage.unreported) return;
+            recordedPhaseEntries(run.stages).forEach(([key, stage]) => {
                 const chip = document.createElement("span");
-                const stageTime = stage.preloaded
-                    ? "Preloaded"
-                    : (stage.unreported ? "Not reported" : formatDuration(Number(stage.duration_seconds)));
-                chip.textContent = `${stage.label}: ${stageTime}`;
-                chip.dataset.stage = timingStageId(stage.stage, stage.label);
+                chip.textContent = historyPhaseChipText(stage);
+                chip.dataset.stage = timingStageId(recordedPhaseStage(key, stage));
+                chip.title = stage.status ? `Phase status: ${stage.status}` : "Observed phase";
                 stages.appendChild(chip);
             });
             const unaccountedTiming = timingSegments.find(segment => segment.stage === "unaccounted" && segment.label === "Unaccounted");
@@ -7188,6 +7278,7 @@ class StatusProPlugin(WAN2GPPlugin):
         }
         if (fieldId === "duration_seconds") return optionalNumber(run.duration_seconds);
         if (fieldId === "generation_time") return optionalNumber(setting(settings, "generation_time"));
+        if (fieldId === "wangp_version") return run.wangp_version || null;
         if (fieldId === "phase_timings") return cloneJson(run.stages, {});
         if (fieldId === "step_performance") return cloneJson(run.step_performance, []);
         if (fieldId === "resource_usage") return cloneJson(run.resources, null);
@@ -7278,11 +7369,7 @@ class StatusProPlugin(WAN2GPPlugin):
             ? [...stageColumns.map(stage => `${stage}_seconds`), "phase_timings"]
             : [column]);
         const rows = records.map(record => {
-            const stageTotals = Object.values(record.phase_timings || {}).reduce((totals, stage) => {
-                const duration = Number(stage && stage.duration_seconds);
-                if (stage && stage.stage && Number.isFinite(duration)) totals[stage.stage] = (totals[stage.stage] || 0) + duration;
-                return totals;
-            }, {});
+            const stageTotals = aggregateStageDurations(record.phase_timings);
             return columns.map(column => {
                 const stageMatch = column.match(/^(prepare|input|encode|denoise|decode|post|save)_seconds$/);
                 const value = stageMatch ? stageTotals[stageMatch[1]] : record[column];
@@ -7466,6 +7553,7 @@ class StatusProPlugin(WAN2GPPlugin):
             const run = {
                 id: rawId,
                 session_id: String(source.session_id || sourceSession).slice(0, 500),
+                wangp_version: typeof source.wangp_version === "string" ? source.wangp_version.slice(0, 80) : null,
                 queue_task_id: source.queue_task_id === undefined ? null : source.queue_task_id,
                 status,
                 started_at: startedAt,
