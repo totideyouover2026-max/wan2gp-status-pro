@@ -2,6 +2,18 @@
 
 All notable Status Pro changes will be recorded here. Versions follow Semantic Versioning.
 
+## [1.1.0] - 2026-09-13
+
+### Added
+
+- Added WanGP V13 native phase progress, unit-aware step/layer/tile counters, nearby WangpProgress support, and richer activities within the existing seven-stage timeline. Legacy WanGP progress remains supported.
+- Added a seven-stage Pipeline timing summary to History. Detailed observed phases retain counters, repeated activities, partial outcomes, concise Save labels, and the reported WanGP version where available; richer data survives export and import.
+
+### Fixed
+
+- Kept text-encoder and VAE tile callbacks separate from denoising step counts, step timing, cache-skip observations, phase numbering, and History Step Observations.
+- Genuine V13 Decode progress is now displayed while legacy stale Decode progress remains suppressed. Cancellation, minimized-window recovery, and Qwen Encode fallback retain their prior behavior.
+
 ## [1.0.6] - 2026-09-05
 
 ### Fixed

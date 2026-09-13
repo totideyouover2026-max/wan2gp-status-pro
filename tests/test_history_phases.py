@@ -76,7 +76,7 @@ for (const outcome of ["aborted", "failed"]) {
     const recorded = partial.runHistory[0];
     const phase = Object.values(recorded.stages).find(p=>p.stage==="encode");
     assert(recorded.status===outcome && phase.current===17 && phase.total===32 && phase.status===outcome, "recording partial run completed its phase");
-    const roundtrip = api.normalizeImportedExport({version:"1.0.6",runs:[api.buildExportRecord(recorded,new Set(["run_id","status","phase_timings"]))]})[0];
+    const roundtrip = api.normalizeImportedExport({version:"1.1.0",runs:[api.buildExportRecord(recorded,new Set(["run_id","status","phase_timings"]))]})[0];
     assert(Object.values(roundtrip.stages).find(p=>p.stage==="encode").current===17, "partial roundtrip counter changed");
 }
 const context = ns();
@@ -93,7 +93,7 @@ assert(run.wangp_version === "13.0", "version lost at completion");
 assert(run.step_performance.length === 8, "phase counters became Step Observations");
 assert(Object.values(run.stages).some(p=>p.raw_label===`Saving File ${filename}` && p.label==="Saving File"), "raw save label not retained separately");
 const exported = api.buildExportRecord(run,new Set(["run_id","status","started_at","completed_at","duration_seconds","phase_timings","step_performance","wangp_version","outputs","output_records"]));
-const imported = api.normalizeImportedExport({version:"1.0.6",runs:[clone(exported)]})[0];
+const imported = api.normalizeImportedExport({version:"1.1.0",runs:[clone(exported)]})[0];
 assert(imported.wangp_version==="13.0" && imported.step_performance.length===8, "roundtrip metadata/observations lost");
 for (const [key,unit] of [["encode:text","layers"],["decode:vae","tiles"],["denoise:main","steps"]]) {
     assert(imported.stages[key].unit===unit && imported.stages[key].current===imported.stages[key].total, "roundtrip phase counters lost");
@@ -115,6 +115,8 @@ assert(text.indexOf("Pipeline timing")<text.indexOf("Observed timing composition
 assert(nodes.find(e=>e.tag==="tbody").children.length===8, "rendered step table includes layer/tile data");
 const chips=nodes.filter(e=>e.className==="status-pro__stage-breakdown");
 assert(chips[0].children.length===7, "pipeline summary does not have seven stages");
+assert(chips[0].children.map(e=>e.textContent).join("|").includes("Enhance: —"), "unused stage did not render as an em dash");
+assert(!chips[0].children.some(e=>/Enhance: 0s/.test(e.textContent)), "unused stage rendered as zero seconds");
 assert(!chips[1].children.some(e=>e.textContent.includes(filename)), "filename leaked into phase chip");
 const old=api.normalizeImportedExport({version:"1.0.5",runs:[{run_id:"old",status:"completed",phase_timings:{encode:{label:"Encoding Text Prompt",duration_seconds:2}}}]})[0];
 assert(!old.wangp_version && !old.stages.encode.current, "invented legacy metadata");

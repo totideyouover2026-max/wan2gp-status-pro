@@ -76,7 +76,7 @@ class ReleaseSmokeTests(unittest.TestCase):
             self.assertTrue((ROOT / document).is_file(), document)
         manifest = json.loads((ROOT / "plugin_info.json").read_text(encoding="utf-8"))
         version = manifest["version"]
-        self.assertEqual(version, "1.0.6")
+        self.assertEqual(version, "1.1.0")
         self.assertIn(f'self.version = "{version}"', source)
         self.assertIn(f'version: "{version}"', source)
         self.assertEqual(manifest["type"], "extension")

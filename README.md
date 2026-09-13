@@ -4,7 +4,7 @@ Status Pro replaces Wan2GP's main status presentation with a responsive pipeline
 
 ![Status Pro V1 overview showing live pipeline tracking, timing metrics, and browser-local history](SlideDeck/1.png)
 
-Status Pro 1.0.6 has been tested with **WanGP 12.452 and later**, but does not declare a hard minimum because its observers degrade gracefully and may also work with earlier releases. It has no additional required Python dependencies; process-memory telemetry uses `psutil` when WanGP already provides it and degrades gracefully when unavailable.
+Status Pro 1.1.0 supports WanGP V13's richer native phase progress while retaining graceful compatibility with older WanGP releases. It has no additional required Python dependencies; process-memory telemetry uses `psutil` when WanGP already provides it and degrades gracefully when unavailable.
 
 [User guide](USER_GUIDE.md) · [Installation](#install-and-enable) · [Release notes](RELEASE_NOTES.md)
 
@@ -12,7 +12,7 @@ Status Pro 1.0.6 has been tested with **WanGP 12.452 and later**, but does not d
 
 - A live, selectable view of the stages WanGP actually reaches.
 - Measured elapsed time, stable denoising ETA, and per-step performance.
-- Honest handling of blocking stages such as Decode when intermediate progress is unavailable.
+- Unit-aware step, layer, and tile counters where WanGP exposes them, including genuine VAE Decode progress in V13.
 - Browser-local history with timing, settings, output, RAM, and VRAM observations.
 - JSON, CSV, and Markdown exports, plus restoration of Status Pro JSON history.
 - Responsive full, narrow, and collapsed layouts that remain available throughout a run.
@@ -70,9 +70,12 @@ For a practical explanation of every stage, History, storage modes, exports, and
 <summary><strong>View the complete feature list</strong></summary>
 
 - Highlights and expands the currently running phase.
+- Keeps the seven-stage timeline while showing richer V13 activities such as text-encoder layers and VAE tiles inside their corresponding stages.
+- Uses native WanGP phase state first, with nearby WangpProgress and legacy Gradio progress markup as compatibility fallbacks.
 - Remains visible before generation, while running, and after a queue completes.
 - Keeps the completed top bar focused on the latest generation task's full duration—including all sliding windows—while the expanded summary shows the session count, cumulative time, and latest completion clock time.
 - Records up to 100 completed queue runs with model/settings metadata, outputs, per-stage durations, and completion status.
+- Summarizes History as seven-stage Pipeline timing, detailed observed timing composition, then denoising-specific Step observations. Newer runs can retain phase counters and the reported WanGP version.
 - Keeps the visible ledger consistent with browser storage limits and warns when older entries must be removed or persistence is unavailable.
 - Records each completed sliding-window segment as `Window N` and resets the live phase timeline for the next window.
 - Collapses multi-window or multi-run queue tasks into one history summary, with chronological child entries available on expansion.

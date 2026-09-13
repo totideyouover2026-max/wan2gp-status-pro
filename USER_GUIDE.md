@@ -47,11 +47,13 @@ The stages shown depend on the model and options being used. Optional stages app
 | **Inputs** | Optional source or control media is being prepared—for example control-video VAE conversion, pose/depth/face extraction, background removal, resizing, or similar preprocessing. This card appears only when WanGP reports such work. |
 | **Encode** | Prompts and semantic conditioning are being converted into information the model can use. **Not reported** means WanGP did not expose this as a separately measurable stage; it does not mean encoding failed. |
 | **Generate** | The main denoising or sampling work is running. This usually provides steps, progress, average step time, and an ETA. |
-| **Decode** | The generated data is being converted into an image, video, or audio output. WanGP usually performs this as one blocking operation, so Status Pro shows elapsed activity rather than inventing a percentage or ETA. |
+| **Decode** | The generated data is being converted into an image, video, or audio output. WanGP V13 can report genuine VAE tile progress; older workflows without intermediate units continue to show elapsed activity without an invented percentage or ETA. |
 | **Enhance** | Optional work such as upscaling, interpolation, or other post-processing. Incremental tools can show steps, progress, step time, and ETA. |
 | **Save** | Final writing, muxing, or export work. It appears only when WanGP reports a separate Save phase. |
 
 Some models perform several Inputs, Generate, or Decode phases. Status Pro records the individual phases while keeping the main row easy to read.
+
+WanGP V13 can expose richer activity counters such as `Encoding Text Prompt · 50/50 layers`, `Denoising · 8/8 steps`, and `VAE Decoding · 28/28 tiles`. These remain details inside the same seven stages; they do not add new top-level stages. Repeated activities, including multiple prompts, passes, and windows, remain individually visible.
 
 The detail panel can also identify the model components involved in a stage—for example the transformer during Prepare, an input VAE during Inputs, text encoders during Encode, and output VAEs during Decode. Status Pro shows concise filenames rather than full local paths or download URLs. When several components are involved, they are listed one per line. Repeated work, such as a pipeline alternating between Inputs and Encode, is retained as separate activity lines with cumulative stage timing.
 
@@ -103,7 +105,9 @@ Expanded records use highlighted, top-aligned field labels to keep long values e
 
 **Attention mode** shows the effective implementation used for the run, including WanGP's global or model-specific default when no per-generation override was selected. Sol Attention also shows its tau value. The mode and tau are separate fields in JSON, CSV, and Markdown exports so performance comparisons can group or filter them independently.
 
-The **Observed timing composition** bar summarizes the measured stage durations across the run. Its colours identify Prepare, Inputs, Encode, Generate, Decode, Enhance, and Save. A diagonally striped **Unaccounted** segment represents wall-clock time that was not covered by an observed stage; it is not an error indicator or a second progress bar.
+Expanded History follows a useful hierarchy: **Pipeline timing** summarizes all seven stages (unused stages show `—`), **Observed timing composition** shows the individual measured activities, and **Step observations** provides denoising/performance detail. Newer runs may also include the WanGP version and final step, layer, or tile counters. Older runs and imported histories remain valid but naturally contain less detail.
+
+The **Observed timing composition** bar summarizes the measured phase durations across the run. Its colours identify Prepare, Inputs, Encode, Generate, Decode, Enhance, and Save. A diagonally striped **Unaccounted** segment represents wall-clock time that was not covered by an observed phase; it is not an error indicator or a second progress bar.
 
 In **Step observations**, the fastest valid Time value in each pass is highlighted in green and the slowest in red. Skipped observations are excluded, and the highlights indicate relative timing only—a slowest step is not necessarily faulty. When skipped observations are present, open the table and turn on **Hide skipped** to review only steps where work was performed. This filters the visible rows only; History storage and exports still contain the complete observations.
 
@@ -265,9 +269,9 @@ The required model was already loaded, so WanGP could move directly to Encode or
 
 Inputs, Enhance, and Save appear only when the current run actually reaches them. Hiding unused optional stages keeps the timeline from implying that work was configured when it was not.
 
-### Why is Decode running without a percentage?
+### Why is Decode sometimes running without a percentage?
 
-WanGP generally exposes VAE decoding as one operation with no intermediate progress units. Status Pro shows that it is active and counts elapsed time instead of displaying a misleading static 0%.
+WanGP V13 can expose real VAE tile progress, which Status Pro displays when available. Older models and WanGP versions may still expose Decode as one operation with no intermediate units; in that case Status Pro shows elapsed activity instead of a misleading percentage.
 
 ### Why is the ETA changing?
 
