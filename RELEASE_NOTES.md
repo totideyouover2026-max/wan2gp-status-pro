@@ -1,4 +1,10 @@
-# Status Pro v1.1.0
+# Status Pro v1.1.1
+
+Status Pro 1.1.1 is a focused download compatibility hotfix. WanGP V13 model, module, and LoRA downloads now pass every native argument through the Status observer unchanged, including progress generators and filename display settings. Older WanGP download calls remain supported.
+
+YuE2 score and semantic-audio token updates now remain single, advancing activities instead of creating duplicate live and History entries. Token, tile, and layer counters remain phase-local rather than entering denoising performance, while genuine acoustic-synthesis steps remain recorded and YuE2 audio decoding appears under Decode.
+
+## Status Pro v1.1.0
 
 Status Pro 1.1.0 adds full support for WanGP V13's richer progress reporting while retaining compatibility with older WanGP releases.
 

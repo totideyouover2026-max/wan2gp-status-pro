@@ -1,12 +1,15 @@
 import ast
 import importlib.util
+import inspect
 import json
 import os
 import pathlib
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
+import types
 import unittest
 
 
@@ -76,7 +79,7 @@ class ReleaseSmokeTests(unittest.TestCase):
             self.assertTrue((ROOT / document).is_file(), document)
         manifest = json.loads((ROOT / "plugin_info.json").read_text(encoding="utf-8"))
         version = manifest["version"]
-        self.assertEqual(version, "1.1.0")
+        self.assertEqual(version, "1.1.1")
         self.assertIn(f'self.version = "{version}"', source)
         self.assertIn(f'version: "{version}"', source)
         self.assertEqual(manifest["type"], "extension")
@@ -1225,6 +1228,58 @@ if (!arbitraryRejected) throw new Error("arbitrary JSON was accepted as a Status
         completed = json.loads(telemetry.snapshot_json())
         self.assertFalse(completed["active"])
         self.assertEqual(completed["totals"]["completed"], 1)
+
+    def test_download_wrapper_forwards_current_and_future_arguments(self):
+        module = _download_module()
+        calls = []
+        marker = object()
+
+        def download_file(url, filename, gen=None, show_filename=True, future_option=None):
+            calls.append((url, filename, gen, show_filename, future_option))
+            if future_option == "fail":
+                raise RuntimeError("download failed")
+            return filename
+
+        download = types.ModuleType("shared.utils.download")
+        download.download_file = download_file
+        download.process_files_def = lambda *args, **kwargs: None
+        download.create_progress_hook = lambda filename: lambda *args: None
+        download.download_def_missing_files = lambda definition: []
+        utils = types.ModuleType("shared.utils")
+        utils.download = download
+        shared = types.ModuleType("shared")
+        shared.utils = utils
+        names = ("shared", "shared.utils", "shared.utils.download")
+        previous = {name: sys.modules.get(name) for name in names}
+        sys.modules.update(dict(zip(names, (shared, utils, download))))
+        try:
+            telemetry = module.DownloadTelemetry()
+            observer = module.DownloadObserver(telemetry)
+            self.assertTrue(observer._install_shared_download_wrappers())
+            wrapped = download.download_file
+            self.assertEqual(inspect.signature(wrapped, follow_wrapped=False).parameters["kwargs"].kind,
+                             inspect.Parameter.VAR_KEYWORD)
+            self.assertEqual(wrapped("https://one", "one.bin"), "one.bin")
+            self.assertEqual(wrapped("https://two", "two.bin", gen=marker, show_filename=False), "two.bin")
+            self.assertEqual(wrapped(url="https://three", filename="three.bin", gen=marker,
+                                     show_filename=False, future_option="future"), "three.bin")
+            self.assertEqual(calls[1], ("https://two", "two.bin", marker, False, None))
+            self.assertEqual(calls[2], ("https://three", "three.bin", marker, False, "future"))
+            self.assertEqual(telemetry.snapshot()["files"][-1]["name"], "three.bin")
+            second = module.DownloadObserver(module.DownloadTelemetry())
+            self.assertTrue(second._install_shared_download_wrappers())
+            self.assertIs(download.download_file, wrapped)
+            with self.assertRaisesRegex(RuntimeError, "download failed"):
+                wrapped("https://four", "four.bin", future_option="fail")
+            failed = telemetry.snapshot()
+            self.assertEqual(failed["files"][-1]["name"], "four.bin")
+            self.assertEqual(failed["files"][-1]["state"], "failed")
+        finally:
+            for name, value in previous.items():
+                if value is None:
+                    sys.modules.pop(name, None)
+                else:
+                    sys.modules[name] = value
 
     def test_browser_storage_quota_returns_the_persisted_subset(self):
         node = shutil.which("node")

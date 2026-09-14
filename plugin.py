@@ -989,7 +989,7 @@ class StatusProPlugin(WAN2GPPlugin):
     def __init__(self):
         super().__init__()
         self.name = "Status Pro"
-        self.version = "1.1.0"
+        self.version = "1.1.1"
         self.description = (
             "Selectable pipeline timeline with stage timings and live ETA estimates."
         )
@@ -1129,8 +1129,9 @@ class StatusProPlugin(WAN2GPPlugin):
                 nonlocal last_step_at, last_skip_count, phase_index, next_sequence, current_total
                 progress_unit = callback_kwargs.get("progress_unit", callback_args[8] if len(callback_args) > 8 else None)
                 progress_title = callback_kwargs.get("progress_title", callback_args[10] if len(callback_args) > 10 else None)
-                # V13 encoder layers and VAE tiles are phase-local, not denoising.
-                if progress_title is not None:
+                normalized_unit = str(progress_unit or "").strip().lower()
+                # Named phases and non-step counters are phase-local, not denoising performance.
+                if progress_title is not None or (normalized_unit and normalized_unit not in ("step", "steps")):
                     return callback(*callback_args, **callback_kwargs)
                 step_idx = callback_kwargs.get("step_idx", callback_args[0] if callback_args else -1)
                 force_refresh = callback_kwargs.get(
@@ -3843,6 +3844,7 @@ class StatusProPlugin(WAN2GPPlugin):
             /\b(?:model|weight|checkpoint|transformer|encoder|vae|whisper|vocoder|lora|file|asset|prompt enhancer)\w*\b/.test(name);
         if (modelLifecycle || /\b(?:initializ|abort|cancel|interrupt)\w*\b/.test(name)) return "prepare";
         if (/\b(?:sav(?:e|ing|ed)?|export\w*|writ(?:e|ing|ten)?|mux\w*|remux\w*|finaliz\w*)\b/.test(name)) return "save";
+        if (/\byue2\s+audio\s+decod\w*\b/.test(name)) return "decode";
 
         // Semantic prompt/text work belongs to Encode even when it uses words such as
         // "enhancing" or mentions references. Check it before media preprocessing.
@@ -3864,8 +3866,22 @@ class StatusProPlugin(WAN2GPPlugin):
         return "prepare";
     }
 
-    function phaseInfo(rawName) {
-        const label = String(rawName || "Preparing")
+    function normalizedPhaseLabel(rawName, progress) {
+        let label = String(rawName || "Preparing").trim() || "Preparing";
+        const current = optionalNumber(progress && progress.current);
+        const total = optionalNumber(progress && progress.total);
+        const unit = String(progress && progress.unit || "").trim().toLowerCase();
+        if (Number.isFinite(current) && Number.isFinite(total) && unit) {
+            const suffix = label.match(/:\s*\d+(?:\.\d+)?\s+(tokens?|tiles?|layers?|steps?)\s*$/i);
+            if (suffix && suffix[1].toLowerCase().replace(/s$/, "") === unit.replace(/s$/, "")) {
+                label = label.slice(0, suffix.index).trim();
+            }
+        }
+        return label || "Preparing";
+    }
+
+    function phaseInfo(rawName, progress) {
+        const label = normalizedPhaseLabel(rawName, progress)
             .replace(/^(?:(?:prompt|sample|sliding window)\s+\d+\s*\/\s*\d+\s*,?\s*)+/i, "")
             .replace(/^\s*-\s*/, "")
             .trim() || "Preparing";
@@ -4662,7 +4678,7 @@ class StatusProPlugin(WAN2GPPlugin):
             active.elapsed = Math.max(0, (now - active.startedAt) / 1000);
             return;
         }
-        const phase = phaseInfo(snapshot.rawName);
+        const phase = phaseInfo(snapshot.rawName, snapshot.steps);
         const previousPhase = state.phases[state.currentPhaseId];
         if (!previousPhase || (previousPhase.phaseKey || previousPhase.id) !== phase.id || previousPhase.stage !== snapshot.id) {
             finishPhase(state);
@@ -5612,11 +5628,12 @@ class StatusProPlugin(WAN2GPPlugin):
         const reported = telemetry && telemetry.progress_phase;
         const phase = String(native && native.phase || (Array.isArray(reported) ? reported[0] : "") || "").trim();
         if (!phase) return null;
-        const aborting = isStoppingStatus(phase) || isStoppingStatus(telemetry && telemetry.status);
-        const id = aborting ? (namespace.state.currentId || stageIdFor(phase)) : stageIdFor(phase);
         const current = optionalNumber(native && native.current);
         const total = optionalNumber(native && native.total);
         const measurable = current !== null && current >= 0 && total !== null && total > 0;
+        const stablePhase = normalizedPhaseLabel(phase, {current, total, unit: native && native.unit});
+        const aborting = isStoppingStatus(phase) || isStoppingStatus(telemetry && telemetry.status);
+        const id = aborting ? (namespace.state.currentId || stageIdFor(stablePhase)) : stageIdFor(stablePhase);
         // Raw pre-V13 phase names retain their earlier, pre-generation fallback.
         if (!native && !aborting) {
             if (id !== "input" && id !== "encode") return null;
@@ -5625,7 +5642,7 @@ class StatusProPlugin(WAN2GPPlugin):
             if (id === "input" && currentId && ["decode", "post", "save"].includes(currentId)) return null;
         }
         return {
-            id, rawName: aborting ? "Aborting" : phase,
+            id, rawName: aborting ? "Aborting" : stablePhase,
             rawMessage: aborting ? String(telemetry.status || phase) : phase,
             metaText: "", stageElapsed: null, nativeEta: null,
             overallElapsed: namespace.state.overallElapsed,
@@ -7438,7 +7455,7 @@ class StatusProPlugin(WAN2GPPlugin):
             downloadText(`status-pro-${stamp}.json`, "application/json;charset=utf-8", JSON.stringify({
                 exported_at: exportedAt.toISOString(),
                 exported_at_local: localIsoTimestamp(exportedAt),
-                version: "1.1.0",
+                version: "1.1.1",
                 ...metadata,
                 runs: records
             }, null, 2));
