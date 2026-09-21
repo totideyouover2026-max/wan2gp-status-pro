@@ -101,7 +101,7 @@ for (const [key,unit] of [["encode:text","layers"],["decode:vae","tiles"],["deno
 assert(imported.outputs.includes(filename), "output filename metadata lost");
 const authoritative = ns();
 api.startRun(authoritative,{id:2,settings:{}},{server_time:300});
-const authoritativeTelemetry={server_time:310,in_progress:false,stage_timing:{task_id:"2",revision:4,last_stage:"save",stages:{
+const authoritativeTelemetry={server_time:310,in_progress:false,stage_timing:{task_id:"2",execution_epoch:1,revision:4,last_stage:"save",stages:{
  encode:{elapsed:7,active:false,completed:true,run_count:1},save:{elapsed:3,active:false,completed:true,run_count:1}}},
  output_records:[{path:"authoritative.mp4",media_type:"video",settings:{}}]};
 api.applyServerStageTiming(authoritative,authoritativeTelemetry);

@@ -214,6 +214,8 @@ class _StageTimingTelemetry:
         self._active_since = None
         self._last_stage = None
         self._revision = 0
+        self._execution_epoch = 0
+        self._retired_task_ids = set()
 
     @staticmethod
     def _now(now):
@@ -237,11 +239,18 @@ class _StageTimingTelemetry:
         with self._lock:
             if self._task_id == key:
                 return
+            if self._task_id is not None:
+                self._close_active(now, completed=False)
+                self._retired_task_ids.add(self._task_id)
+                if len(self._retired_task_ids) > 32:
+                    self._retired_task_ids = set(list(self._retired_task_ids)[-32:])
+            self._retired_task_ids.discard(key)
             self._task_id = key
             self._stages = {}
             self._active_stage = None
             self._active_since = None
             self._last_stage = None
+            self._execution_epoch += 1
             self._revision += 1
             self._observe_stage_locked("prepare", now)
 
@@ -281,6 +290,8 @@ class _StageTimingTelemetry:
         key = str(task_id)
         with self._lock:
             if self._task_id != key:
+                if key in self._retired_task_ids:
+                    return False
                 self.start_task(key, now)
             return self._observe_stage_locked(stage_id, now)
 
@@ -297,8 +308,6 @@ class _StageTimingTelemetry:
     def snapshot(self, task_id=None, now=None):
         now = self._now(now)
         with self._lock:
-            if task_id is not None and self._task_id != str(task_id):
-                return {"task_id": str(task_id), "revision": self._revision, "stages": {}}
             stages = {}
             for stage_id, source in self._stages.items():
                 active = stage_id == self._active_stage and self._active_since is not None
@@ -310,7 +319,8 @@ class _StageTimingTelemetry:
                     "completed": bool(source["completed"]),
                     "run_count": int(source["run_count"]),
                 }
-            return {"task_id": self._task_id, "revision": self._revision,
+            return {"task_id": self._task_id, "execution_epoch": self._execution_epoch,
+                    "revision": self._revision,
                     "last_stage": self._last_stage, "stages": stages}
 
 
@@ -5596,6 +5606,11 @@ class StatusProPlugin(WAN2GPPlugin):
         const now = Number.isFinite(options.startedAt) ? options.startedAt : observedNow;
         const settings = cloneJson(task && task.settings, {});
         normalizeRunSettings(settings);
+        const initialStageTiming = telemetry && telemetry.stage_timing;
+        const initialStageTimingEpoch = optionalNumber(initialStageTiming && initialStageTiming.execution_epoch);
+        const initialStageTimingMatches = task && task.id !== undefined && task.id !== null &&
+            initialStageTiming && initialStageTiming.task_id !== undefined && initialStageTiming.task_id !== null &&
+            String(initialStageTiming.task_id) === String(task.id) && Number.isFinite(initialStageTimingEpoch);
         const observedWindow = windowDetails(telemetry);
         const window = {
             number: Number.isFinite(options.windowNo) ? options.windowNo : observedWindow.number,
@@ -5619,6 +5634,7 @@ class StatusProPlugin(WAN2GPPlugin):
             resources: null,
             step_summary: null,
             _performance_step_keys: {},
+            _stageTimingEpoch: initialStageTimingMatches ? initialStageTimingEpoch : null,
             outputs: [],
             output_baseline: Number.isFinite(options.outputBaseline)
                 ? options.outputBaseline
@@ -5675,6 +5691,7 @@ class StatusProPlugin(WAN2GPPlugin):
             if (record === stage) {
                 record.hasRun = true;
                 record.isActive = false;
+                record.serverActive = false;
             }
         }
     }
@@ -5728,6 +5745,7 @@ class StatusProPlugin(WAN2GPPlugin):
         delete run.outcome_status;
         delete run.notice_baseline;
         delete run.client_id;
+        delete run._stageTimingEpoch;
         delete run.window_prompt;
         delete run.window_prompts;
         if (namespace.historyRecording === false) {
@@ -6264,7 +6282,14 @@ class StatusProPlugin(WAN2GPPlugin):
     function applyServerStageTiming(namespace, telemetry) {
         const timing = telemetry && telemetry.stage_timing;
         const stages = timing && timing.stages;
-        if (!stages || typeof stages !== "object" || !namespace || !namespace.state) return false;
+        const activeRun = namespace && namespace.activeRun;
+        const timingEpoch = optionalNumber(timing && timing.execution_epoch);
+        if (!stages || typeof stages !== "object" || !namespace || !namespace.state || !activeRun ||
+            activeRun.queue_task_id === null || activeRun.queue_task_id === undefined ||
+            timing.task_id === null || timing.task_id === undefined ||
+            String(timing.task_id) !== String(activeRun.queue_task_id) || !Number.isFinite(timingEpoch)) return false;
+        if (Number.isFinite(activeRun._stageTimingEpoch) && activeRun._stageTimingEpoch !== timingEpoch) return false;
+        activeRun._stageTimingEpoch = timingEpoch;
         const state = namespace.state;
         const receivedAt = browserMonotonicNow();
         let activeId = null;
@@ -6322,6 +6347,7 @@ class StatusProPlugin(WAN2GPPlugin):
         if (record.state === "aborting") {
             record.hasRun = true;
             record.isActive = false;
+            record.serverActive = false;
             return;
         }
         if (record.state !== "current") return;
@@ -6334,6 +6360,7 @@ class StatusProPlugin(WAN2GPPlugin):
         record.state = "complete";
         record.hasRun = true;
         record.isActive = false;
+        record.serverActive = false;
         record.hasCompleted = true;
         record.progress = 100;
         record.eta = 0;
