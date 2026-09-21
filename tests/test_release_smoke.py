@@ -172,14 +172,15 @@ class ReleaseSmokeTests(unittest.TestCase):
         node = shutil.which("node")
         if not node:
             self.skipTest("Node is required for queue-status regression validation")
-        javascript = _javascript_with_exports("readLiveSnapshot")
+        javascript = _javascript_with_exports("readLiveSnapshot", "syncIdleModelLifecycle")
         test_script = r'''
-const {readLiveSnapshot} = globalThis.__statusProReleaseTest;
+const {readLiveSnapshot, syncIdleModelLifecycle} = globalThis.__statusProReleaseTest;
 const namespace = {
   state: {currentId: null, overallElapsed: null, steps: {}, records: {}},
   source: {querySelector: selector => selector === "textarea, input" ? {value: "Aborting"} : null, querySelectorAll: () => []},
   download: {active: false, visible: false},
-  runTelemetry: {in_progress: true, active_task: {id: 1}, status: "Aborting"}
+  runTelemetry: {in_progress: true, active_task: {id: 1}, status: "Aborting"},
+  activeRun: null, idleOperation: null
 };
 function check(condition, message) { if (!condition) throw new Error(message); }
 check(readLiveSnapshot(namespace).aborting, "active abort must remain visible");
@@ -195,8 +196,12 @@ check(readLiveSnapshot(namespace) === null, "completed download revived Prepare"
 namespace.runTelemetry.model_lifecycle = {state: "unloaded"};
 check(readLiveSnapshot(namespace) === null, "completed unload revived Prepare");
 namespace.runTelemetry.model_lifecycle = {state: "unloading"};
-check(readLiveSnapshot(namespace).activity === "unload", "live unload was hidden");
+check(readLiveSnapshot(namespace) === null, "idle unload became a generation Prepare stage");
+syncIdleModelLifecycle(namespace);
+check(namespace.idleOperation && namespace.idleOperation.type === "model_unload", "idle unload was hidden");
 namespace.runTelemetry.model_lifecycle = null;
+syncIdleModelLifecycle(namespace);
+check(namespace.idleOperation === null, "finished idle unload did not clear");
 namespace.download.active = true;
 namespace.source.querySelector = () => null;
 check(readLiveSnapshot(namespace).rawName === "Downloading model files", "live download was hidden");
@@ -2316,6 +2321,36 @@ legacy.active_task=A;ns.activeRun=null;sync(legacy);ok(ns.activeRun.queue_task_i
                                 text=True, encoding="utf-8", capture_output=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_history_ordinals_are_status_owned_and_queue_ids_remain_exportable(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is required for history ordinal validation")
+        javascript = _javascript_with_exports(
+            "groupHistoryRuns", "historyDisplayOrdinal", "exportFieldValue"
+        )
+        test_script = r'''
+const api = globalThis.__statusProReleaseTest;
+const check = (condition, message) => {if (!condition) throw new Error(message);};
+const runs = [
+  {id: "r4", session_id: "s", queue_task_id: 4, started_at: 4000},
+  {id: "r3", session_id: "s", queue_task_id: 3, started_at: 3000},
+  {id: "r1", session_id: "s", queue_task_id: 1, started_at: 1000},
+];
+const groups = api.groupHistoryRuns(runs);
+const visible = groups.map((group, index) => ({
+  title: `Run #${api.historyDisplayOrdinal(groups.length, index)}`,
+  queue: group.runs[0].queue_task_id,
+}));
+check(visible.map(item => item.title).join() === "Run #3,Run #2,Run #1", "history ordinals follow WanGP IDs");
+check(visible.map(item => item.queue).join() === "4,3,1", "real queue IDs were rewritten");
+check(api.exportFieldValue(runs[1], "queue_task_id", new Set()) === 3, "queue_task_id export changed");
+'''
+        result = subprocess.run([node, "-"], input=javascript + "\n" + test_script,
+                                text=True, encoding="utf-8", capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('title.textContent = `Run #${ordinal}`', _source())
+        self.assertIn('addRunField(fields, "Queue Task ID", run.queue_task_id)', _source())
+
     def test_authoritative_worker_outcomes_and_task_owned_late_outputs(self):
         node = shutil.which("node")
         if not node:
@@ -2364,6 +2399,55 @@ ok(!history.runHistory[1].status_reason&&!history.runHistory[1].failure_reason,"
 ok(history.runHistory[0].outputs.length===0,"late Task A output attached to Task B");
 '''
         result = subprocess.run([node, "-"], input=javascript + "\n" + script,
+                                text=True, encoding="utf-8", capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_idle_model_unload_is_stable_and_task_switch_keeps_prepare_path(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is required for idle lifecycle validation")
+        javascript = _javascript_with_exports(
+            "freshState", "syncIdleModelLifecycle", "renderIdle", "readLiveSnapshot"
+        )
+        test_script = r'''
+const api = globalThis.__statusProReleaseTest;
+const check = (condition, message) => {if (!condition) throw new Error(message);};
+const elements = new Map();
+const panel = {querySelector: selector => {
+  const supported = ["[data-sp-idle]", "[data-sp-running]", "[data-sp-live]", "[data-sp-steps]",
+    "[data-sp-overall]", "[data-sp-eta]", "[data-sp-idle-title]", "[data-sp-idle-message]"];
+  if (!supported.includes(selector)) return null;
+  if (!elements.has(selector)) elements.set(selector, {hidden: false, textContent: ""});
+  return elements.get(selector);
+}};
+const ns = {state: api.freshState(), panel, activeRun: null, idleOperation: null,
+  runHistory: [], sessionRunIds: new Set(), historyRecording: true, historyOpen: false,
+  source: {querySelector: () => null, querySelectorAll: () => []},
+  download: {active: false, visible: false}, progressEpochReady: true};
+ns.runTelemetry = {execution_task_known: true, executing_task: null, in_progress: false,
+  model_lifecycle: {token: "one", state: "unloading", model_name: "Flux"}};
+api.syncIdleModelLifecycle(ns); api.renderIdle(ns);
+const firstTitle = elements.get("[data-sp-idle-title]").textContent;
+api.syncIdleModelLifecycle(ns); api.renderIdle(ns);
+check(firstTitle === "Unloading Flux" && elements.get("[data-sp-idle-title]").textContent === firstTitle,
+  "manual/final unload presentation flickered");
+check(ns.activeRun === null && !ns.state.records.prepare.hasRun, "idle unload created a fake run or Prepare stage");
+ns.runTelemetry.model_lifecycle = {token: "one", state: "unloaded", model_name: "Flux"};
+api.syncIdleModelLifecycle(ns); api.renderIdle(ns);
+check(elements.get("[data-sp-idle-title]").textContent === "Model unloaded", "terminal unload was not stable");
+ns.runTelemetry.model_lifecycle = null; api.syncIdleModelLifecycle(ns); api.renderIdle(ns);
+check(ns.idleOperation === null, "idle unload did not clear once");
+
+const task = {id: "B", settings: {}};
+ns.activeRun = {queue_task_id: "B"};
+ns.runTelemetry = {execution_task_known: true, executing_task: task, model_lifecycle:
+  {token: "switch", state: "unloading", model_name: "Flux"}};
+api.syncIdleModelLifecycle(ns);
+const switching = api.readLiveSnapshot(ns);
+check(ns.idleOperation === null && switching && switching.activity === "unload",
+  "model-switch unload no longer belongs to Task B Prepare");
+'''
+        result = subprocess.run([node, "-"], input=javascript + "\n" + test_script,
                                 text=True, encoding="utf-8", capture_output=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
 

@@ -135,16 +135,29 @@ class _ModelLifecycleTelemetry:
     def __init__(self):
         self._lock = threading.RLock()
         self._event = None
+        self._active_unloads = 0
 
     def begin_unload(self, model_type, model_name):
-        token = str(time.time_ns())
+        now = time.time()
         with self._lock:
+            # One WanGP unload action can call release_model repeatedly while
+            # tearing down components. Keep those calls in one session.
+            previous = self._event
+            completed_at = previous.get("completed_at") if previous else None
+            coalesced = bool(previous and (
+                previous.get("state") == "unloading" or
+                (completed_at is not None and now - float(completed_at) <= 1.5)
+            ))
+            token = previous.get("token") if coalesced else str(time.time_ns())
+            started_at = previous.get("started_at") if coalesced else now
+            previous_name = previous.get("model_name") if coalesced else None
+            self._active_unloads = self._active_unloads + 1 if previous and previous.get("state") == "unloading" else 1
             self._event = {
                 "token": token,
                 "state": "unloading",
                 "model_type": str(model_type or "")[:300],
-                "model_name": str(model_name or model_type or "Previously loaded model")[:500],
-                "started_at": time.time(),
+                "model_name": str(model_name or model_type or previous_name or "Previously loaded model")[:500],
+                "started_at": started_at,
                 "completed_at": None,
                 "error": "",
             }
@@ -153,6 +166,9 @@ class _ModelLifecycleTelemetry:
     def finish_unload(self, token, error=None):
         with self._lock:
             if not self._event or self._event.get("token") != token:
+                return
+            self._active_unloads = max(0, self._active_unloads - 1)
+            if self._active_unloads:
                 return
             self._event["state"] = "failed" if error else "unloaded"
             self._event["completed_at"] = time.time()
@@ -174,7 +190,7 @@ MODEL_LIFECYCLE_TELEMETRY = _ModelLifecycleTelemetry()
 STRUCTURED_STAGE_ORDER = ("prepare", "input", "encode", "denoise", "decode", "post", "save")
 STRUCTURED_PHASE_STAGE_RULES = (
     ("save", ("saving", "saved", "save output", "exporting", "writing output", "muxing", "remuxing", "finalizing")),
-    ("input", ("vae encoding", "vae encode", "input preprocessing", "preparing input", "preparing control",
+    ("input", ("encoding hum carrier", "vae encoding", "vae encode", "input preprocessing", "preparing input", "preparing control",
                "loading control", "extracting pose", "extracting depth", "removing reference background")),
     ("encode", ("encoding prompt", "encoding text prompt", "text encoding", "prompt encoding", "preparing conditioning",
                 "conditioning", "building embeddings", "text features")),
@@ -183,7 +199,8 @@ STRUCTURED_PHASE_STAGE_RULES = (
               "distilled refinement", "interpolation", "color correction", "film grain", "tcdecoder",
               "seedvc", "voice replacement", "audio post processing")),
     ("denoise", ("denoising", "diffusion", "sampling", "generating audio", "generating waveform",
-                 "generating speech", "spectrum smoothing replay", "yue2 semantic audio", "yue2 acoustic synthesis")),
+                 "generating speech", "spectrum smoothing replay", "yue2 score", "yue2 semantic audio",
+                 "yue2 acoustic synthesis")),
     ("prepare", ("preparing", "initializing", "loading model", "downloading model", "compiling", "warming up")),
 )
 
@@ -201,6 +218,37 @@ def _structured_stage_id(raw_phase):
                phase.startswith(item + " |") for item in phrases):
             return stage_id
     return None
+
+
+def _task_model_type(task, settings=None):
+    params = task.get("params") if isinstance(task, dict) and isinstance(task.get("params"), dict) else {}
+    settings = settings if isinstance(settings, dict) else {}
+    return str(
+        settings.get("model_type") or settings.get("base_model_type") or
+        params.get("model_type") or params.get("base_model_type") or ""
+    ).strip().lower()
+
+
+def _task_is_h3(task, settings=None):
+    return _task_model_type(task, settings).startswith("minimax_h3")
+
+
+def _task_is_yue2(task, settings=None):
+    return _task_model_type(task, settings).startswith("yue2")
+
+
+def _task_is_yue2_hum(task, settings=None):
+    return _task_model_type(task, settings).startswith("yue2_hum")
+
+
+def _task_owned_stage_id(task, raw_phase):
+    """Map a callback using the model identity captured with that callback."""
+    stage_id = _structured_stage_id(raw_phase)
+    normalized = " ".join(str(raw_phase or "").strip().lower().replace("_", " ").replace("-", " ").split())
+    if _task_is_yue2(task) and stage_id == "decode" and "yue2 audio decoding" not in normalized:
+        if "vae decoding" in normalized or "vae decode" in normalized:
+            return None
+    return stage_id
 
 
 class _StageTimingTelemetry:
@@ -1052,8 +1100,16 @@ def plan_stages_for_task(task, telemetry_context=None):
     """Plan stable top-level presentation stages from the queued job definition."""
     context = telemetry_context if isinstance(telemetry_context, dict) else {}
     settings = context.get("settings") if isinstance(context.get("settings"), dict) else {}
-    plan = ["prepare", "encode"]
-    if _task_has_input_media(task):
+    h3 = _task_is_h3(task, settings)
+    yue2 = _task_is_yue2(task, settings)
+    yue2_hum = _task_is_yue2_hum(task, settings)
+    plan = ["prepare"]
+    if not yue2:
+        plan.append("encode")
+    # Media presence alone is not a measurable stage. H3 consumes references
+    # inside prompt conditioning without a distinct input callback. YuE2 only
+    # exposes an input boundary for its Hum-to-Song carrier encoder.
+    if yue2_hum or (_task_has_input_media(task) and not h3 and not yue2):
         plan.append("input")
     plan.extend(("denoise", "decode"))
     enhanced = _task_has_enhancement(task, settings)
@@ -1066,7 +1122,7 @@ def plan_stages_for_task(task, telemetry_context=None):
         str(key).lower() in explicit_save_keys and _configured_task_value(value)
         for key, value in params.items()
     )
-    if enhanced or explicit_save or mode in {"edit_remux", "edit_audio"}:
+    if enhanced or explicit_save or h3 or yue2 or mode in {"edit_remux", "edit_audio"}:
         plan.append("save")
     return list(dict.fromkeys(stage for stage in plan if stage in PLANNED_STAGE_IDS))
 
@@ -1465,6 +1521,9 @@ class StatusProPlugin(WAN2GPPlugin):
             gen = state.get("gen") if isinstance(state.get("gen"), dict) else {}
             queue = gen.get("queue") if isinstance(gen.get("queue"), list) else []
             executing = gen.get("api_active_queue_task")
+            timing_task = executing if isinstance(executing, dict) else (
+                queue[0] if queue and isinstance(queue[0], dict) else None
+            )
             task_id = executing.get("id") if isinstance(executing, dict) else (
                 queue[0].get("id") if queue and isinstance(queue[0], dict) else None
             )
@@ -1499,8 +1558,9 @@ class StatusProPlugin(WAN2GPPlugin):
                     if stage_timing is not None:
                         phase_state = gen.get("progress_phase")
                         phase_label = phase_state[0] if isinstance(phase_state, (list, tuple)) and phase_state else ""
-                        stage_timing.observe_phase(
-                            task_id, progress_title or phase_label, execution_epoch=execution_epoch
+                        stage_timing.observe_stage(
+                            task_id, _task_owned_stage_id(timing_task, progress_title or phase_label),
+                            execution_epoch=execution_epoch
                         )
                     return result
                 step_idx = callback_kwargs.get("step_idx", callback_args[0] if callback_args else -1)
@@ -1528,9 +1588,12 @@ class StatusProPlugin(WAN2GPPlugin):
                     result = callback(*callback_args, **callback_kwargs)
                     phase_state = gen.get("progress_phase")
                     if stage_timing is not None:
-                        stage_timing.observe_phase(
+                        stage_timing.observe_stage(
                             task_id,
-                            phase_state[0] if isinstance(phase_state, (list, tuple)) and phase_state else "",
+                            _task_owned_stage_id(
+                                timing_task,
+                                phase_state[0] if isinstance(phase_state, (list, tuple)) and phase_state else "",
+                            ),
                             execution_epoch=execution_epoch,
                         )
                     return result
@@ -1575,9 +1638,12 @@ class StatusProPlugin(WAN2GPPlugin):
                 result = callback(*callback_args, **callback_kwargs)
                 phase_state = gen.get("progress_phase")
                 if stage_timing is not None:
-                    stage_timing.observe_phase(
+                    stage_timing.observe_stage(
                         task_id,
-                        phase_state[0] if isinstance(phase_state, (list, tuple)) and phase_state else "",
+                        _task_owned_stage_id(
+                            timing_task,
+                            phase_state[0] if isinstance(phase_state, (list, tuple)) and phase_state else "",
+                        ),
                         execution_epoch=execution_epoch,
                     )
                 return result
@@ -1628,8 +1694,8 @@ class StatusProPlugin(WAN2GPPlugin):
                     if command == "progress" and isinstance(data, (list, tuple)) and len(data) > 1:
                         phase = data[1]
                     if command in ("status", "progress"):
-                        self._stage_timing.observe_phase(
-                            task_id, phase, execution_epoch=execution_epoch
+                        self._stage_timing.observe_stage(
+                            task_id, _task_owned_stage_id(task, phase), execution_epoch=execution_epoch
                         )
                     if command == "output" and task_outcomes is not None:
                         task_outcomes.capture_outputs(task_id, execution_epoch, task_outputs())
@@ -4367,6 +4433,8 @@ class StatusProPlugin(WAN2GPPlugin):
         if (modelLifecycle || /\b(?:initializ|abort|cancel|interrupt)\w*\b/.test(name)) return "prepare";
         if (/\b(?:sav(?:e|ing|ed)?|export\w*|writ(?:e|ing|ten)?|mux\w*|remux\w*|finaliz\w*)\b/.test(name)) return "save";
         if (/\byue2\s+audio\s+decod\w*\b/.test(name)) return "decode";
+        if (/\bencoding\s+hum\s+carrier\b/.test(name)) return "input";
+        if (/\byue2\s+score\b/.test(name)) return "denoise";
 
         // Semantic prompt/text work belongs to Encode even when it uses words such as
         // "enhancing" or mentions references. Check it before media preprocessing.
@@ -4391,7 +4459,7 @@ class StatusProPlugin(WAN2GPPlugin):
 
     const STRUCTURED_PHASE_STAGE_RULES = [
         ["save", ["saving", "saved", "save output", "exporting", "writing output", "muxing", "remuxing", "finalizing"]],
-        ["input", ["vae encoding", "vae encode", "input preprocessing", "preparing input", "preparing control",
+        ["input", ["encoding hum carrier", "vae encoding", "vae encode", "input preprocessing", "preparing input", "preparing control",
             "loading control", "extracting pose", "extracting depth", "removing reference background"]],
         ["encode", ["encoding prompt", "encoding text prompt", "text encoding", "prompt encoding", "preparing conditioning",
             "conditioning", "building embeddings", "text features"]],
@@ -4400,7 +4468,7 @@ class StatusProPlugin(WAN2GPPlugin):
             "distilled refinement", "interpolation", "color correction", "film grain", "tcdecoder",
             "seedvc", "voice replacement", "audio post processing"]],
         ["denoise", ["denoising", "diffusion", "sampling", "generating audio", "generating waveform",
-            "generating speech", "spectrum smoothing replay", "yue2 semantic audio", "yue2 acoustic synthesis"]],
+            "generating speech", "spectrum smoothing replay", "yue2 score", "yue2 semantic audio", "yue2 acoustic synthesis"]],
         ["prepare", ["preparing", "initializing", "loading model", "downloading model", "compiling", "warming up"]]
     ];
 
@@ -6388,6 +6456,31 @@ class StatusProPlugin(WAN2GPPlugin):
         };
     }
 
+    function syncIdleModelLifecycle(namespace) {
+        const telemetry = namespace.runTelemetry;
+        const idleEligible = telemetry && telemetry.execution_task_known === true
+            ? !telemetry.executing_task
+            : telemetry && telemetry.in_progress === false && !telemetry.active_task;
+        if (!idleEligible) {
+            namespace.idleOperation = null;
+            return null;
+        }
+        const lifecycle = telemetry && telemetry.model_lifecycle;
+        if (!lifecycle || !/^(?:unloading|unloaded|failed)$/.test(String(lifecycle.state || ""))) {
+            namespace.idleOperation = null;
+            return null;
+        }
+        const modelName = String(lifecycle.model_name || lifecycle.model_type || "Previously loaded model");
+        namespace.idleOperation = {
+            type: "model_unload",
+            token: String(lifecycle.token || "model-unload"),
+            state: String(lifecycle.state),
+            modelName,
+            error: String(lifecycle.error || "")
+        };
+        return namespace.idleOperation;
+    }
+
     function authoritativeTimingActiveStage(namespace) {
         const telemetry = namespace && namespace.runTelemetry;
         const run = namespace && namespace.activeRun;
@@ -7767,6 +7860,10 @@ class StatusProPlugin(WAN2GPPlugin):
             : namespace.runHistory;
     }
 
+    function historyDisplayOrdinal(groupCount, newestFirstIndex) {
+        return Math.max(1, Number(groupCount) - Number(newestFirstIndex));
+    }
+
     function selectedHistoryRuns(namespace) {
         return namespace.runHistory.filter(run => namespace.selectedRunIds.has(String(run.id)));
     }
@@ -7792,14 +7889,12 @@ class StatusProPlugin(WAN2GPPlugin):
             const childLabel = Number.isFinite(optionalNumber(run.window_no))
                 ? `window ${Math.floor(Number(run.window_no))}`
                 : `run ${fallbackNumber}`;
-            select.setAttribute("aria-label", `Select ${grouped ? childLabel : (run.queue_task_id !== null && run.queue_task_id !== undefined ? `task ${run.queue_task_id}` : childLabel)} for export`);
+            select.setAttribute("aria-label", `Select ${grouped ? childLabel : `run ${fallbackNumber}`} for export`);
             const title = document.createElement("span");
             title.className = "status-pro__run-title";
             title.textContent = grouped
                 ? (Number.isFinite(optionalNumber(run.window_no)) ? `Window ${Math.floor(Number(run.window_no))}` : `Run ${fallbackNumber}`)
-                : run.queue_task_id !== null && run.queue_task_id !== undefined
-                ? `Task #${run.queue_task_id}`
-                : `Run ${fallbackNumber}`;
+                : `Run #${fallbackNumber}`;
             const model = document.createElement("span");
             model.className = "status-pro__run-model";
             model.textContent = runDescriptor(run);
@@ -7859,6 +7954,7 @@ class StatusProPlugin(WAN2GPPlugin):
                 addRunField(fields, "Export version", run.import_source && run.import_source.version);
             }
             addRunField(fields, "Total time", formatDuration(Number(run.duration_seconds)));
+            addRunField(fields, "Queue Task ID", run.queue_task_id);
             const generationTime = optionalNumber(setting(settings, "generation_time"));
             const phaseTiming = phaseTimingSummary(run);
             if (Number.isFinite(generationTime) && generationTime >= 0) {
@@ -8054,7 +8150,7 @@ class StatusProPlugin(WAN2GPPlugin):
         };
     }
 
-    function createHistoryTaskGroup(namespace, group) {
+    function createHistoryTaskGroup(namespace, group, ordinal) {
         const aggregate = historyTaskSummary(group);
         const representative = aggregate.representative;
         const details = document.createElement("details");
@@ -8074,11 +8170,11 @@ class StatusProPlugin(WAN2GPPlugin):
         const selectedCount = group.runs.filter(run => namespace.selectedRunIds.has(String(run.id))).length;
         select.checked = selectedCount === group.runs.length;
         select.indeterminate = selectedCount > 0 && selectedCount < group.runs.length;
-        select.setAttribute("aria-label", `Select all ${aggregate.unitLabel} in task ${representative.queue_task_id} for export`);
+        select.setAttribute("aria-label", `Select all ${aggregate.unitLabel} in run ${ordinal} for export`);
 
         const title = document.createElement("span");
         title.className = "status-pro__run-title";
-        title.textContent = `Task #${representative.queue_task_id}`;
+        title.textContent = `Run #${ordinal}`;
         const model = document.createElement("span");
         model.className = "status-pro__run-model";
         model.textContent = runDescriptor(representative);
@@ -8122,11 +8218,16 @@ class StatusProPlugin(WAN2GPPlugin):
             : "No generations recorded yet.";
         const fragment = document.createDocumentFragment();
         const groups = groupHistoryRuns(runs);
+        const allGroups = groupHistoryRuns(namespace.runHistory);
+        const ordinalByKey = new Map(allGroups.map((group, index) => [
+            group.key, historyDisplayOrdinal(allGroups.length, index)
+        ]));
         namespace.visibleHistoryGroups = new Map(groups.map(group => [group.key, group]));
         groups.forEach((group, index) => {
+            const ordinal = ordinalByKey.get(group.key) || historyDisplayOrdinal(groups.length, index);
             fragment.appendChild(group.runs.length > 1
-                ? createHistoryTaskGroup(namespace, group)
-                : createHistoryRun(namespace, group.runs[0], groups.length - index, false));
+                ? createHistoryTaskGroup(namespace, group, ordinal)
+                : createHistoryRun(namespace, group.runs[0], ordinal, false));
         });
         container.replaceChildren(fragment);
     }
@@ -8916,6 +9017,21 @@ class StatusProPlugin(WAN2GPPlugin):
         if (!idle || !running) return;
         idle.hidden = false;
         running.hidden = true;
+        const operation = namespace.idleOperation;
+        if (operation && operation.type === "model_unload") {
+            const failed = operation.state === "failed";
+            const complete = operation.state === "unloaded";
+            text(namespace.panel, "[data-sp-live]", failed ? "Model unload failed" : (complete ? "Model unloaded" : "Unloading model"));
+            text(namespace.panel, "[data-sp-steps]", "");
+            text(namespace.panel, "[data-sp-overall]", "");
+            text(namespace.panel, "[data-sp-eta]", "");
+            text(namespace.panel, "[data-sp-idle-title]", failed ? "Model unload failed" : (complete ? "Model unloaded" : `Unloading ${operation.modelName}`));
+            text(namespace.panel, "[data-sp-idle-message]", failed
+                ? (operation.error || `${operation.modelName} could not be unloaded.`)
+                : (complete ? `${operation.modelName} was released from RAM and VRAM.` : `Releasing ${operation.modelName} from RAM and VRAM.`));
+            renderHistoryDrawer(namespace);
+            return;
+        }
         const sessionRuns = namespace.runHistory.filter(run => namespace.sessionRunIds.has(run.id));
         const completed = namespace.historyRecording !== false && sessionRuns.length > 0;
         const {generationCount, totalDuration, latestFinishedAt, latestDuration, outcomes} = sessionCompletionSummary(sessionRuns);
@@ -9370,9 +9486,7 @@ class StatusProPlugin(WAN2GPPlugin):
             : telemetry && telemetry.in_progress === false && !telemetry.active_task;
         if (noExecutingTask &&
             !downloading) {
-            return lifecycle && lifecycle.state === "unloading"
-                ? modelLifecycleSnapshot(namespace)
-                : null;
+            return null;
         }
         if (telemetry && telemetry.execution_task_known === true && telemetry.executing_task &&
             namespace.progressEpochReady === false && !downloading) {
@@ -9429,6 +9543,7 @@ class StatusProPlugin(WAN2GPPlugin):
         observeRunOutcome(namespace, visibleFailureNotice(namespace));
         readGalleryNavigationResult(namespace);
         readDownloadSnapshot(namespace);
+        syncIdleModelLifecycle(namespace);
         const snapshot = readLiveSnapshot(namespace);
         if (snapshot) {
             observeRunOutcome(namespace, snapshot.rawName, snapshot.rawMessage);
@@ -9445,7 +9560,8 @@ class StatusProPlugin(WAN2GPPlugin):
             resetJob(namespace);
         }
         setActive(namespace, true);
-        if (namespace.activeRun || (namespace.completedStateUntil && now < namespace.completedStateUntil)) render(namespace);
+        if (namespace.idleOperation && !namespace.activeRun) renderIdle(namespace);
+        else if (namespace.activeRun || (namespace.completedStateUntil && now < namespace.completedStateUntil)) render(namespace);
         else renderIdle(namespace);
     }
 
@@ -9512,6 +9628,7 @@ class StatusProPlugin(WAN2GPPlugin):
             downloadRaw: "",
             runTelemetry: initialRunBridge.telemetry,
             runRaw: initialRunBridge.raw,
+            idleOperation: null,
             qwenEncodeFallbackStartedAt: 0,
             activeRun: null,
             runHistory,
