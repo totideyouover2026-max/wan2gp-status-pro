@@ -100,7 +100,10 @@ for (const [key,unit] of [["encode:text","layers"],["decode:vae","tiles"],["deno
 }
 assert(imported.outputs.includes(filename), "output filename metadata lost");
 const authoritative = ns();
-api.startRun(authoritative,{id:2,settings:{}},{server_time:300});
+api.startRun(authoritative,{id:2,settings:{}},{server_time:300,
+ planned_stages:["prepare","encode","denoise","decode","save"],planned_stage_task_id:"2",
+ planned_stage_execution_epoch:1,planned_stage_revision:1,
+ stage_timing:{task_id:"2",execution_epoch:1,revision:1,last_stage:"prepare",stages:{}}});
 const authoritativeTelemetry={server_time:310,in_progress:false,stage_timing:{task_id:"2",execution_epoch:1,revision:4,last_stage:"save",stages:{
  encode:{elapsed:7,active:false,completed:true,run_count:1},save:{elapsed:3,active:false,completed:true,run_count:1}}},
  output_records:[{path:"authoritative.mp4",media_type:"video",settings:{}}]};
@@ -111,6 +114,9 @@ assert(authoritativeRun.stages.encode.authoritative&&authoritativeRun.stages.enc
  "History did not use authoritative Encode timing");
 assert(authoritativeRun.stages.save.authoritative&&authoritativeRun.stages.save.duration_seconds===3,
  "History completion grace changed Save timing");
+assert(authoritativeRun.stages.encode.stage==="encode"&&authoritativeRun.stages.save.stage==="save"&&
+ !Object.values(authoritativeRun.stages).some(stage=>"display_position" in stage),
+ "Per-task display numbering corrupted semantic history stages");
 class Element {
     constructor(tag) {this.tag=tag;this.children=[];this.dataset={};this.style={};this.classList={add(){},toggle(){}};this.textContent="";}
     append(...children) {this.children.push(...children);}
