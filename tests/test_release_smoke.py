@@ -2322,7 +2322,7 @@ legacy.active_task=A;ns.activeRun=null;sync(legacy);ok(ns.activeRun.queue_task_i
             self.skipTest("Node is required for task-outcome validation")
         javascript = _javascript_with_exports(
             "freshState", "startRun", "finishRun", "applyServerStageTiming",
-            "normalizeRunMedia", "reconcileTaskOutcomes", "taskOutcomeForRun",
+            "normalizeRunMedia", "reconcileTaskOutcomes", "taskOutcomeForRun", "exportFieldValue",
         )
         script = r'''
 const api=globalThis.__statusProReleaseTest,ok=(v,m)=>{if(!v)throw new Error(m)};
@@ -2338,9 +2338,12 @@ function make(id,epoch){
  api.startRun(ns,task,telemetry);api.applyServerStageTiming(ns,telemetry);return {ns,telemetry,run:ns.activeRun};
 }
 const success=make("A",11);
+success.run.outcome_status="failed";success.run.status_reason="Error";success.run.failure_reason="Error";
 success.telemetry.task_outcomes=[{task_id:"A",execution_epoch:11,known:true,success:true,aborted:false,output_records:[]}];
 api.finishRun(success.ns,"failed",11000,success.telemetry);
 ok(success.run.status==="completed","worker success with delayed outputs was marked failed");
+ok(!success.run.status_reason&&!success.run.failure_reason,"successful run retained a stale Error outcome");
+ok(api.exportFieldValue(success.run,"outcome",new Set())===null,"successful export retained Error outcome detail");
 ok(success.run.stages.save&&success.run.stages.save.status==="complete","successful Save became failed");
 const failed=make("F",12);failed.telemetry.task_outcomes=[{task_id:"F",execution_epoch:12,known:true,success:false,aborted:false,error:"worker exploded",output_records:[]}];
 api.finishRun(failed.ns,"completed",11000,failed.telemetry);ok(failed.run.status==="failed"&&failed.run.failure_reason.includes("worker exploded"),"worker failure was lost");
@@ -2350,13 +2353,14 @@ const legacy={status:"completed",completed_at:1000,settings:{},stages:{},outputs
 api.normalizeRunMedia(legacy);ok(legacy.status==="completed","empty output discovery still implied failure");
 const history={historyRecording:false,runHistory:[
  {id:"run-b",queue_task_id:"B",execution_epoch:22,status:"running",settings:{},stages:{},outputs:[],output_records:[]},
- {id:"run-a",queue_task_id:"A",execution_epoch:21,status:"completed",settings:{},stages:{},outputs:[],output_records:[]}
+ {id:"run-a",queue_task_id:"A",execution_epoch:21,status:"completed",status_reason:"Error",failure_reason:"Error",settings:{},stages:{},outputs:[],output_records:[]}
 ]};
 api.reconcileTaskOutcomes(history,{task_outcomes:[
  {task_id:"A",execution_epoch:21,known:true,success:true,aborted:false,
   output_records:[{path:"outputs/a.png",media_type:"image",settings:{prompt:"A"}}]}
 ]});
 ok(history.runHistory[1].outputs.join()==="outputs/a.png","late Task A output did not enrich Task A");
+ok(!history.runHistory[1].status_reason&&!history.runHistory[1].failure_reason,"late authoritative success retained Error outcome detail");
 ok(history.runHistory[0].outputs.length===0,"late Task A output attached to Task B");
 '''
         result = subprocess.run([node, "-"], input=javascript + "\n" + script,

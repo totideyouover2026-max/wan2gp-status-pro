@@ -388,6 +388,19 @@ class _TaskOutcomeTelemetry:
                     for item in self._records]
 
 
+def _recover_polled_stage_timing(stage_timing, task_id, execution_epoch, native_phase, status,
+                                 execution_task_known):
+    """Use unowned global WanGP phase fields only for the pre-V13 fallback path."""
+    if execution_task_known or stage_timing is None or task_id is None:
+        return False
+    observed = stage_timing.observe_phase(
+        task_id, native_phase, execution_epoch=execution_epoch
+    )
+    return bool(stage_timing.observe_phase(
+        task_id, status, execution_epoch=execution_epoch
+    ) or observed)
+
+
 
 def _telemetry_value(value, depth=0):
     """Return a small JSON-safe representation without copying media payloads."""
@@ -1746,8 +1759,10 @@ class StatusProPlugin(WAN2GPPlugin):
                 timing_task_id = self._active_task_id
                 timing_epoch = self._stage_timing.start_task(timing_task_id)
                 native_phase = _native_progress_snapshot(gen).get("phase")
-                self._stage_timing.observe_phase(timing_task_id, native_phase, execution_epoch=timing_epoch)
-                self._stage_timing.observe_phase(timing_task_id, gen.get("status"), execution_epoch=timing_epoch)
+                _recover_polled_stage_timing(
+                    self._stage_timing, timing_task_id, timing_epoch, native_phase,
+                    gen.get("status"), execution_task_known,
+                )
             elif execution_task_known:
                 self._stage_timing.finish_task(completed=False)
             if active_task and gen.get("sliding_window"):
@@ -5305,6 +5320,12 @@ class StatusProPlugin(WAN2GPPlugin):
                 run.status = status;
                 changed = true;
             }
+            if (status === "completed" && outcome.success === true &&
+                (run.status_reason || run.failure_reason)) {
+                delete run.status_reason;
+                delete run.failure_reason;
+                changed = true;
+            }
             if (status === "failed" && outcome.error && run.status_reason !== outcome.error) {
                 run.status_reason = String(outcome.error).slice(0, 500);
                 run.failure_reason = run.status_reason;
@@ -6107,6 +6128,10 @@ class StatusProPlugin(WAN2GPPlugin):
         normalizeRunMedia(run);
         run.status = outcome;
         if (taskOutcome && taskOutcome.error && run.status === "failed") run.status_reason = String(taskOutcome.error).slice(0, 500);
+        if (taskOutcome && taskOutcome.known === true && taskOutcome.success === true && run.status === "completed") {
+            delete run.status_reason;
+            delete run.failure_reason;
+        }
         if (run.status === "failed") run.failure_reason = run.status_reason || "Generation failed.";
         delete run.outcome_status;
         delete run.notice_baseline;
