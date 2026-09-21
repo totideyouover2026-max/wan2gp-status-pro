@@ -233,12 +233,12 @@ class _StageTimingTelemetry:
 
     def start_task(self, task_id, now=None):
         if task_id is None:
-            return
+            return None
         now = self._now(now)
         key = str(task_id)
         with self._lock:
             if self._task_id == key:
-                return
+                return self._execution_epoch
             if self._task_id is not None:
                 self._close_active(now, completed=False)
                 self._retired_task_ids.add(self._task_id)
@@ -253,6 +253,7 @@ class _StageTimingTelemetry:
             self._execution_epoch += 1
             self._revision += 1
             self._observe_stage_locked("prepare", now)
+            return self._execution_epoch
 
     def _transition_allowed(self, stage_id):
         if self._active_stage is None or self._active_stage == stage_id:
@@ -322,6 +323,63 @@ class _StageTimingTelemetry:
             return {"task_id": self._task_id, "execution_epoch": self._execution_epoch,
                     "revision": self._revision,
                     "last_stage": self._last_stage, "stages": stages}
+
+
+class _TaskOutcomeTelemetry:
+    """Short-lived authoritative worker outcomes, keyed to task and execution epoch."""
+
+    def __init__(self):
+        self._lock = threading.RLock()
+        self._records = []
+        self._revision = 0
+
+    def begin(self, task_id, execution_epoch):
+        if task_id is None or execution_epoch is None:
+            return
+        record = {"task_id": str(task_id), "execution_epoch": int(execution_epoch),
+                  "known": False, "success": None, "aborted": False, "error": None,
+                  "output_records": [], "revision": self._revision}
+        with self._lock:
+            self._records = [item for item in self._records
+                             if not (item["task_id"] == record["task_id"] and
+                                     item["execution_epoch"] == record["execution_epoch"])]
+            self._records.append(record)
+            self._records = self._records[-16:]
+
+    def capture_outputs(self, task_id, execution_epoch, output_records):
+        with self._lock:
+            record = self._find(task_id, execution_epoch)
+            if record is None:
+                return
+            by_path = {str(item.get("path") or ""): dict(item) for item in record["output_records"]}
+            for item in output_records or []:
+                if isinstance(item, dict) and item.get("path"):
+                    by_path[str(item["path"])] = dict(item)
+            record["output_records"] = list(by_path.values())
+            self._revision += 1
+            record["revision"] = self._revision
+
+    def finish(self, task_id, execution_epoch, success, aborted=False, error=None, output_records=None):
+        with self._lock:
+            record = self._find(task_id, execution_epoch)
+            if record is None:
+                return
+            record.update(known=True, success=bool(success), aborted=bool(aborted),
+                          error=str(error)[:500] if error else None, completed_at=time.time())
+            self._revision += 1
+            record["revision"] = self._revision
+        self.capture_outputs(task_id, execution_epoch, output_records)
+
+    def _find(self, task_id, execution_epoch):
+        key = str(task_id)
+        epoch = int(execution_epoch)
+        return next((item for item in reversed(self._records)
+                     if item["task_id"] == key and item["execution_epoch"] == epoch), None)
+
+    def snapshot(self):
+        with self._lock:
+            return [{**item, "output_records": [dict(output) for output in item["output_records"]]}
+                    for item in self._records]
 
 
 
@@ -886,14 +944,12 @@ def _postprocessing_metadata(settings):
 
 PLANNED_STAGE_IDS = ("prepare", "input", "encode", "denoise", "decode", "post", "save")
 TASK_INPUT_MEDIA_KEYS = {
-    "image_start", "image_end", "start_image", "end_image", "init_image", "input_image",
-    "input_images", "reference", "references", "reference_image", "reference_images", "image_refs", "ref_images",
-    "image_reference", "reference_paths", "first_frame", "last_frame", "start_frame", "end_frame",
-    "source_image", "source_video", "source_audio", "source_media", "input_video", "input_audio",
-    "video_guide", "image_guide", "audio_guide", "control_image", "control_images", "control_video",
-    "controlnet_image", "controlnet_video", "control_net_image", "control_net_video",
-    "conditioning_image", "conditioning_images", "conditioning_video", "conditioning_media",
-    "mask_image", "pose_image", "depth_image", "media_input", "media_inputs", "inputs",
+    # Keep this aligned with WanGP's ATTACHMENT_KEYS.  Capability/schema fields
+    # (including component_models.input) are deliberately not media evidence.
+    "image_start", "image_end", "image_refs", "image_guide", "image_mask",
+    "video_guide", "video_guide2", "video_mask", "video_source",
+    "audio_guide", "audio_guide2", "audio_source",
+    "replace_voice_sample", "replace_voice_sample2", "custom_guide",
 }
 
 
@@ -911,23 +967,45 @@ def _configured_task_value(value):
     return True
 
 
-def _task_has_input_media(task):
+def _effective_media_value(value):
+    """Match WanGP upload values without treating Gradio placeholder metadata as media."""
+    if value is None or value is False:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() not in {"", "none", "null", "false"}
+    if isinstance(value, dict):
+        # Gradio FileData placeholders contain a truthy ``meta._type`` even when
+        # every actual payload carrier is empty.  Only inspect media carriers.
+        for key in ("path", "name", "orig_name", "url", "image", "video", "audio", "file", "data"):
+            if key in value and _effective_media_value(value.get(key)):
+                return True
+        return False
+    if isinstance(value, (list, tuple, set)):
+        return any(_effective_media_value(item) for item in value)
+    # PIL images and Gradio file objects are genuine values; scalar defaults are not.
+    if isinstance(value, (int, float, bool)):
+        return False
+    for attribute in ("path", "name"):
+        candidate = getattr(value, attribute, None)
+        if _effective_media_value(candidate):
+            return True
+    return value.__class__.__module__.startswith("PIL.")
+
+
+def has_effective_media_input(task):
     if not isinstance(task, dict):
         return False
     params = task.get("params") if isinstance(task.get("params"), dict) else {}
-    media_roles = ("input", "source", "reference", "ref", "control", "guide", "start", "end",
-                   "init", "conditioning", "mask", "pose", "depth")
-    media_types = ("image", "images", "video", "audio", "media", "frame", "frames")
     for values in (task, params):
         for raw_key, value in values.items():
             key = str(raw_key or "").strip().lower().replace("-", "_").replace(" ", "_")
-            if not _configured_task_value(value):
-                continue
-            if key in TASK_INPUT_MEDIA_KEYS:
-                return True
-            if any(role in key for role in media_roles) and any(kind in key for kind in media_types):
+            if key in TASK_INPUT_MEDIA_KEYS and _effective_media_value(value):
                 return True
     return False
+
+
+def _task_has_input_media(task):
+    return has_effective_media_input(task)
 
 
 def _task_has_enhancement(task, settings):
@@ -1144,6 +1222,14 @@ def _output_records(paths, settings_values, audio_hint=False):
     return records
 
 
+def _generation_output_records(state):
+    state = state if isinstance(state, dict) else {}
+    gen = state.get("gen") if isinstance(state.get("gen"), dict) else {}
+    return _output_records(gen.get("file_list"), gen.get("file_settings_list")) + _output_records(
+        gen.get("audio_file_list"), gen.get("audio_file_settings_list"), audio_hint=True
+    )
+
+
 def _gallery_entry_path(value):
     if isinstance(value, (list, tuple)) and value:
         value = value[0]
@@ -1248,6 +1334,7 @@ class StatusProPlugin(WAN2GPPlugin):
         self._latest_performance = None
         self._active_task_id = None
         self._stage_timing = _StageTimingTelemetry()
+        self._task_outcomes = _TaskOutcomeTelemetry()
         self._generation_timing_observer_installed = False
         self._model_lifecycle_observer_installed = False
 
@@ -1484,7 +1571,20 @@ class StatusProPlugin(WAN2GPPlugin):
         def observed(task, *args, **kwargs):
             task_id = task.get("id") if isinstance(task, dict) else None
             self._active_task_id = task_id
-            self._stage_timing.start_task(task_id)
+            execution_epoch = self._stage_timing.start_task(task_id)
+            task_outcomes = getattr(self, "_task_outcomes", None)
+            if task_outcomes is not None:
+                task_outcomes.begin(task_id, execution_epoch)
+            state = kwargs.get("state")
+            output_reader = globals().get("_generation_output_records")
+            initial_paths = {record["path"] for record in output_reader(state)} if callable(output_reader) else set()
+
+            def task_outputs():
+                if not callable(output_reader):
+                    return []
+                return [record for record in output_reader(state)
+                        if record.get("path") not in initial_paths]
+
             call_args = list(args)
             send_cmd = kwargs.get("send_cmd")
             send_in_args = send_cmd is None and call_args and callable(call_args[0])
@@ -1498,17 +1598,29 @@ class StatusProPlugin(WAN2GPPlugin):
                         phase = data[1]
                     if command in ("status", "progress"):
                         self._stage_timing.observe_phase(task_id, phase)
+                    if command == "output" and task_outcomes is not None:
+                        task_outcomes.capture_outputs(task_id, execution_epoch, task_outputs())
                     return send_cmd(command, data, *send_args, **send_kwargs)
                 if send_in_args:
                     call_args[0] = observed_send_cmd
                 else:
                     kwargs["send_cmd"] = observed_send_cmd
             result = False
+            error = None
             try:
                 result = original(task, *call_args, **kwargs)
                 return result
+            except BaseException as exc:
+                error = exc
+                raise
             finally:
                 self._stage_timing.finish_task(task_id, completed=bool(result))
+                state_gen = state.get("gen") if isinstance(state, dict) and isinstance(state.get("gen"), dict) else {}
+                if task_outcomes is not None:
+                    task_outcomes.finish(
+                        task_id, execution_epoch, bool(result), aborted=bool(state_gen.get("abort")),
+                        error=error, output_records=task_outputs(),
+                    )
 
         observed._status_pro_generation_timing_observer = True
         self.set_global("generate_media", observed)
@@ -1665,6 +1777,7 @@ class StatusProPlugin(WAN2GPPlugin):
                 "performance": _latest_performance_snapshot(gen, self._latest_performance),
                 "model_lifecycle": MODEL_LIFECYCLE_TELEMETRY.snapshot(),
                 "stage_timing": stage_timing,
+                "task_outcomes": self._task_outcomes.snapshot(),
                 "planned_stages": planned_stages if plan_matches_timing else [],
                 "planned_stage_task_id": stage_timing.get("task_id") if plan_matches_timing else None,
                 "planned_stage_execution_epoch": stage_timing.get("execution_epoch") if plan_matches_timing else None,
@@ -5130,11 +5243,61 @@ class StatusProPlugin(WAN2GPPlugin):
     }
 
     function runStatusFrom(namespace, telemetry) {
+        const authoritative = taskOutcomeForRun(namespace.activeRun, telemetry);
+        if (authoritative && authoritative.known === true) {
+            if (authoritative.aborted === true) return "aborted";
+            return authoritative.success === true ? "completed" : "failed";
+        }
         const field = namespace.source.querySelector("textarea, input");
         const message = `${String(telemetry && telemetry.status || "")} ${String(field && field.value || "")}`;
         if (isStoppingStatus(message)) return "aborted";
         if (/\b(error|failed|failure|exception)\b/i.test(message)) return "failed";
         return "completed";
+    }
+
+    function taskOutcomeForRun(run, telemetry) {
+        if (!run || run.queue_task_id === null || run.queue_task_id === undefined) return null;
+        const epoch = optionalNumber(run._stageTimingEpoch ?? run.execution_epoch);
+        if (!Number.isFinite(epoch)) return null;
+        const outcomes = Array.isArray(telemetry && telemetry.task_outcomes) ? telemetry.task_outcomes : [];
+        return outcomes.find(outcome => outcome && String(outcome.task_id) === String(run.queue_task_id) &&
+            optionalNumber(outcome.execution_epoch) === epoch) || null;
+    }
+
+    function authoritativeOutcomeStatus(outcome, fallback = "completed") {
+        if (!outcome || outcome.known !== true) return fallback;
+        if (outcome.aborted === true) return "aborted";
+        return outcome.success === true ? "completed" : "failed";
+    }
+
+    function reconcileTaskOutcomes(namespace, telemetry) {
+        const outcomes = Array.isArray(telemetry && telemetry.task_outcomes) ? telemetry.task_outcomes : [];
+        let changed = false;
+        namespace.runHistory.forEach(run => {
+            const outcome = taskOutcomeForRun(run, telemetry);
+            if (!outcome || outcome.known !== true) return;
+            const status = authoritativeOutcomeStatus(outcome, run.status);
+            if (run.status !== status) {
+                run.status = status;
+                changed = true;
+            }
+            if (status === "failed" && outcome.error && run.status_reason !== outcome.error) {
+                run.status_reason = String(outcome.error).slice(0, 500);
+                run.failure_reason = run.status_reason;
+                changed = true;
+            }
+            const records = Array.isArray(outcome.output_records) ? cloneJson(outcome.output_records, []) : [];
+            if (records.length) {
+                const existing = new Map((run.output_records || []).map(record => [String(record.path || ""), record]));
+                records.forEach(record => existing.set(String(record.path || ""), record));
+                run.output_records = Array.from(existing.values()).filter(record => record && record.path);
+                run.outputs = run.output_records.map(record => String(record.path));
+                normalizeRunMedia(run);
+                changed = true;
+            }
+        });
+        if (changed && namespace.historyRecording !== false) persistRunHistory(namespace);
+        return changed;
     }
 
     function observeRunOutcome(namespace, ...messages) {
@@ -5709,10 +5872,6 @@ class StatusProPlugin(WAN2GPPlugin):
         if (run.status === "completed" && abortedStage) {
             run.status = "aborted";
             run.status_reason = run.status_reason || "Cancelled before completion.";
-        } else if (run.status === "completed" && run.completed_at && run.output_count === 0 && !run.imported) {
-            run.status = "failed";
-            run.status_reason = run.status_reason || "Generation ended without producing an output.";
-            run.failure_reason = run.failure_reason || run.status_reason;
         }
         return run;
     }
@@ -5720,8 +5879,26 @@ class StatusProPlugin(WAN2GPPlugin):
     function normalizePlannedStages(value) {
         const stages = Array.isArray(value) ? value : [];
         return stages
-            .map(stage => String(stage || ""))
+            .map(stage => ({generate: "denoise", enhance: "post"}[String(stage || "").trim().toLowerCase()] || String(stage || "").trim().toLowerCase()))
             .filter((stage, index, values) => STAGE_ID_SET.has(stage) && values.indexOf(stage) === index);
+    }
+
+    function activateInitialPrepare(namespace) {
+        const state = namespace.state;
+        const record = state.records.prepare;
+        ensureStageInPlan(state, "prepare");
+        record.visible = true;
+        record.state = "current";
+        record.hasRun = true;
+        record.isActive = true;
+        record.hasCompleted = false;
+        record.runCount = 1;
+        record.startedAt = Date.now();
+        record.elapsed = 0;
+        record.elapsedBase = 0;
+        state.currentId = "prepare";
+        state.selectedId = "prepare";
+        state.selectionIsManual = false;
     }
 
     function applyServerStagePlan(namespace, telemetry) {
@@ -5811,6 +5988,7 @@ class StatusProPlugin(WAN2GPPlugin):
             notice_baseline: visibleFailureNotice(namespace)
         };
         applyServerStagePlan(namespace, telemetry);
+        activateInitialPrepare(namespace);
         observePerformanceTelemetry(namespace.activeRun, telemetry);
     }
 
@@ -5863,6 +6041,7 @@ class StatusProPlugin(WAN2GPPlugin):
         const run = namespace.activeRun;
         if (!run) return;
         const telemetrySnapshot = telemetry || namespace.runTelemetry;
+        const taskOutcome = taskOutcomeForRun(run, telemetrySnapshot);
         observePerformanceTelemetry(run, telemetrySnapshot);
         recoverMissedPerformanceStages(namespace);
         const bridgeObservedAt = Number(telemetrySnapshot && telemetrySnapshot.server_time) * 1000 || Date.now();
@@ -5872,13 +6051,15 @@ class StatusProPlugin(WAN2GPPlugin):
         const outputLimit = Number.isFinite(outputEnd)
             ? Math.min(Math.max(outputStart, Math.floor(outputEnd)), outputRecords.length)
             : outputRecords.length;
-        const completedOutputRecords = outputRecords.slice(outputStart, outputLimit);
-        const outcome = run.outcome_status || status || "completed";
-        const unsuccessful = !["completed", "window"].includes(outcome) ||
-            (outcome === "completed" && completedOutputRecords.length === 0);
+        const completedOutputRecords = taskOutcome
+            ? cloneJson(taskOutcome.output_records, [])
+            : outputRecords.slice(outputStart, outputLimit);
+        const fallbackOutcome = run.outcome_status || status || "completed";
+        const outcome = status === "window" ? "window" : authoritativeOutcomeStatus(taskOutcome, fallbackOutcome);
+        const unsuccessful = !["completed", "window"].includes(outcome);
         const ended = unsuccessful ? observedEnded : inferredRunCompletionTime(run, telemetrySnapshot, observedEnded, completedOutputRecords);
         const browserStageEnded = Date.now() - Math.max(0, bridgeObservedAt - ended);
-        finishHistoryPhases(namespace.state, unsuccessful ? (outcome === "completed" ? "failed" : outcome) : outcome, browserStageEnded);
+        finishHistoryPhases(namespace.state, outcome, browserStageEnded);
         run.completed_at = ended;
         run.duration_seconds = Math.max(0, Math.round((ended - run.started_at) / 100) / 10);
         run.stages = stageDurations(namespace.state);
@@ -5898,12 +6079,10 @@ class StatusProPlugin(WAN2GPPlugin):
             });
         }
         delete run.output_baseline;
+        run.execution_epoch = optionalNumber(run._stageTimingEpoch);
         normalizeRunMedia(run);
-        run.status = status === "window" ? "window" : (run.outcome_status || status || "completed");
-        if (run.status === "completed" && run.outputs.length === 0) {
-            run.status = "failed";
-            run.status_reason = run.status_reason || "Generation ended without producing an output.";
-        }
+        run.status = outcome;
+        if (taskOutcome && taskOutcome.error && run.status === "failed") run.status_reason = String(taskOutcome.error).slice(0, 500);
         if (run.status === "failed") run.failure_reason = run.status_reason || "Generation failed.";
         delete run.outcome_status;
         delete run.notice_baseline;
@@ -5981,6 +6160,7 @@ class StatusProPlugin(WAN2GPPlugin):
         const progressSignature = executionProgressSignature(telemetry);
         const previousSignature = namespace.lastExecutionProgressSignature || "";
         if (namespace.activeRun) observePerformanceTelemetry(namespace.activeRun, telemetry);
+        reconcileTaskOutcomes(namespace, telemetry);
 
         if (task) {
             if (namespace.activeRun && namespace.progressEpochReady === false &&
@@ -5990,7 +6170,7 @@ class StatusProPlugin(WAN2GPPlugin):
                 finishRun(namespace, "window", now, telemetry);
             }
             if (namespace.activeRun && activeKey && activeKey !== nextKey) {
-                finishRun(namespace, "completed", now, telemetry);
+                finishRun(namespace, runStatusFrom(namespace, telemetry), now, telemetry);
             }
             if (!namespace.activeRun) {
                 const changedTask = Boolean(namespace.lastExecutingTaskKey && namespace.lastExecutingTaskKey !== nextKey);
@@ -6437,7 +6617,7 @@ class StatusProPlugin(WAN2GPPlugin):
 
     function stageElapsedNow(record) {
         if (!record) return null;
-        if (record.serverTimed && record.serverActive && Number.isFinite(record.serverElapsed) &&
+        if (record.serverTimed && record.serverActive && record.isActive && Number.isFinite(record.serverElapsed) &&
             Number.isFinite(record.serverReceivedAt)) {
             return record.serverElapsed + Math.max(0, browserMonotonicNow() - record.serverReceivedAt) / 1000;
         }
@@ -6457,7 +6637,28 @@ class StatusProPlugin(WAN2GPPlugin):
         activeRun._stageTimingEpoch = timingEpoch;
         const state = namespace.state;
         const receivedAt = browserMonotonicNow();
-        let activeId = null;
+        const activeId = STAGE_DEFS.map(definition => definition.id).find(id =>
+            stages[id] && typeof stages[id] === "object" && stages[id].active === true
+        ) || null;
+        const hasAuthoritativeStage = STAGE_DEFS.some(definition =>
+            stages[definition.id] && typeof stages[definition.id] === "object"
+        );
+        if (!hasAuthoritativeStage) return true;
+        Object.values(state.records).forEach(record => {
+            if (record.id === activeId) return;
+            if (record.isActive && record.state === "current" && hasAuthoritativeStage) {
+                record.elapsed = stageElapsedNow(record);
+                record.hasRun = true;
+                record.hasCompleted = true;
+                record.state = "complete";
+                record.progress = 100;
+                record.eta = 0;
+            }
+            record.isActive = false;
+            record.serverActive = false;
+            record.startedAt = null;
+            record.serverReceivedAt = null;
+        });
         STAGE_DEFS.forEach(definition => {
             const source = stages[definition.id];
             if (!source || typeof source !== "object") return;
@@ -6470,8 +6671,8 @@ class StatusProPlugin(WAN2GPPlugin):
             record.runCount = Number.isFinite(runCount) ? Math.max(0, Math.floor(runCount)) : Math.max(1, record.runCount || 0);
             record.serverTimed = Number.isFinite(elapsed);
             record.serverElapsed = Number.isFinite(elapsed) ? Math.max(0, elapsed) : null;
-            record.serverReceivedAt = receivedAt;
-            record.serverActive = source.active === true;
+            record.serverReceivedAt = definition.id === activeId ? receivedAt : null;
+            record.serverActive = definition.id === activeId;
             record.serverTimingRevision = optionalNumber(timing.revision);
             if (Number.isFinite(elapsed)) {
                 record.elapsed = Math.max(0, elapsed);
@@ -6480,13 +6681,13 @@ class StatusProPlugin(WAN2GPPlugin):
                 record.reportedAt = Date.now();
             }
             if (source.completed === true) record.hasCompleted = true;
-            if (source.active === true) {
-                activeId = definition.id;
+            if (definition.id === activeId) {
                 record.isActive = true;
                 record.state = "current";
                 record.startedAt = Date.now();
             } else {
                 record.isActive = false;
+                record.startedAt = null;
                 if (record.hasCompleted && record.state !== "aborting") {
                     record.state = "complete";
                     record.progress = 100;
@@ -6514,6 +6715,8 @@ class StatusProPlugin(WAN2GPPlugin):
             record.hasRun = true;
             record.isActive = false;
             record.serverActive = false;
+            record.startedAt = null;
+            record.serverReceivedAt = null;
             return;
         }
         if (record.state !== "current") return;
@@ -6527,6 +6730,8 @@ class StatusProPlugin(WAN2GPPlugin):
         record.hasRun = true;
         record.isActive = false;
         record.serverActive = false;
+        record.startedAt = null;
+        record.serverReceivedAt = null;
         record.hasCompleted = true;
         record.progress = 100;
         record.eta = 0;
