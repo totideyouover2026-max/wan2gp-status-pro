@@ -5177,6 +5177,15 @@ class StatusProPlugin(WAN2GPPlugin):
         return task && task.id !== null && task.id !== undefined ? String(task.id) : "";
     }
 
+    function taskExecutionKey(task, telemetry) {
+        const taskId = runTaskKey(task);
+        const timing = telemetry && telemetry.stage_timing;
+        const epoch = optionalNumber(timing && timing.execution_epoch);
+        if (!taskId || !timing || timing.task_id === null || timing.task_id === undefined ||
+            String(timing.task_id) !== taskId || !Number.isFinite(epoch)) return "";
+        return `${taskId}:${epoch}`;
+    }
+
     function windowDetails(telemetry) {
         if (!telemetry) return { number: null, total: null };
         let number = optionalNumber(telemetry.window_no);
@@ -6154,6 +6163,11 @@ class StatusProPlugin(WAN2GPPlugin):
     function finishRun(namespace, status, completedAt, telemetry, outputEnd) {
         const run = namespace.activeRun;
         if (!run) return;
+        const finishedStageId = namespace.state.currentId;
+        const finishedEpoch = optionalNumber(run._stageTimingEpoch);
+        const finishedExecutionKey = Number.isFinite(finishedEpoch)
+            ? `${String(run.queue_task_id)}:${finishedEpoch}`
+            : "";
         const telemetrySnapshot = telemetry || namespace.runTelemetry;
         const taskOutcome = taskOutcomeForRun(run, telemetrySnapshot);
         observePerformanceTelemetry(run, telemetrySnapshot);
@@ -6209,10 +6223,12 @@ class StatusProPlugin(WAN2GPPlugin):
         delete run._stagePlanEpoch;
         delete run.window_prompt;
         delete run.window_prompts;
+        if (status !== "window" && finishedExecutionKey) namespace.completedExecutionKey = finishedExecutionKey;
+        const completionHoldUntil = finishedStageId === "save" ? 0 : Date.now() + IDLE_GRACE_MS;
         if (namespace.historyRecording === false) {
             namespace.lastCompletedAt = ended;
             namespace.activeRun = null;
-            namespace.completedStateUntil = Date.now() + IDLE_GRACE_MS;
+            namespace.completedStateUntil = completionHoldUntil;
             return;
         }
         if (run.settings && (namespace.promptMemory === false || !modeStoresPrompts(namespace.historyPersistence))) {
@@ -6225,7 +6241,7 @@ class StatusProPlugin(WAN2GPPlugin):
         namespace.lastCompletedAt = ended;
         persistRunHistory(namespace);
         namespace.activeRun = null;
-        namespace.completedStateUntil = Date.now() + IDLE_GRACE_MS;
+        namespace.completedStateUntil = completionHoldUntil;
     }
 
     function executionProgressSignature(telemetry) {
@@ -6271,6 +6287,7 @@ class StatusProPlugin(WAN2GPPlugin):
         const taskSource = authoritative ? telemetry.executing_task : telemetry.active_task;
         const task = taskSource && typeof taskSource === "object" ? taskSource : null;
         const nextKey = runTaskKey(task);
+        const nextExecutionKey = taskExecutionKey(task, telemetry);
         const activeKey = namespace.activeRun && namespace.activeRun.queue_task_id !== null
             ? String(namespace.activeRun.queue_task_id)
             : "";
@@ -6281,6 +6298,19 @@ class StatusProPlugin(WAN2GPPlugin):
         reconcileTaskOutcomes(namespace, telemetry);
 
         if (task) {
+            const terminalOutcome = namespace.activeRun && taskOutcomeForRun(namespace.activeRun, telemetry);
+            if (terminalOutcome && terminalOutcome.known === true) {
+                finishRun(namespace, runStatusFrom(namespace, telemetry), now, telemetry);
+                namespace.lastExecutingTaskKey = nextKey;
+                namespace.lastExecutionProgressSignature = progressSignature;
+                return;
+            }
+            if (authoritative && !namespace.activeRun && nextExecutionKey &&
+                namespace.completedExecutionKey === nextExecutionKey) {
+                namespace.lastExecutingTaskKey = nextKey;
+                namespace.lastExecutionProgressSignature = progressSignature;
+                return;
+            }
             if (namespace.activeRun && namespace.progressEpochReady === false &&
                 progressSignature !== previousSignature) namespace.progressEpochReady = true;
             splitMissedSlidingWindows(namespace, task, telemetry, now);
@@ -9667,6 +9697,7 @@ class StatusProPlugin(WAN2GPPlugin):
             sessionRunIds: new Set(historyPersistence === "persistent" ? [] : runHistory.map(run => run.id)),
             lastCompletedAt: null,
             completedStateUntil: 0,
+            completedExecutionKey: "",
             lastExecutingTaskKey: "",
             lastExecutionProgressSignature: "",
             progressEpochReady: true,
