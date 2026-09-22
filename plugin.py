@@ -6223,7 +6223,12 @@ class StatusProPlugin(WAN2GPPlugin):
         delete run._stagePlanEpoch;
         delete run.window_prompt;
         delete run.window_prompts;
-        if (status !== "window" && finishedExecutionKey) namespace.completedExecutionKey = finishedExecutionKey;
+        if (status !== "window") {
+            namespace.completedTaskKey = run.queue_task_id !== null && run.queue_task_id !== undefined
+                ? String(run.queue_task_id)
+                : "";
+            if (finishedExecutionKey) namespace.completedExecutionKey = finishedExecutionKey;
+        }
         const completionHoldUntil = finishedStageId === "save" ? 0 : Date.now() + IDLE_GRACE_MS;
         if (namespace.historyRecording === false) {
             namespace.lastCompletedAt = ended;
@@ -6305,8 +6310,10 @@ class StatusProPlugin(WAN2GPPlugin):
                 namespace.lastExecutionProgressSignature = progressSignature;
                 return;
             }
-            if (authoritative && !namespace.activeRun && nextExecutionKey &&
-                namespace.completedExecutionKey === nextExecutionKey) {
+            const lingeringCompletedTask = authoritative && !namespace.activeRun &&
+                namespace.completedTaskKey === nextKey &&
+                (!nextExecutionKey || namespace.completedExecutionKey === nextExecutionKey);
+            if (lingeringCompletedTask) {
                 namespace.lastExecutingTaskKey = nextKey;
                 namespace.lastExecutionProgressSignature = progressSignature;
                 return;
@@ -9697,6 +9704,7 @@ class StatusProPlugin(WAN2GPPlugin):
             sessionRunIds: new Set(historyPersistence === "persistent" ? [] : runHistory.map(run => run.id)),
             lastCompletedAt: null,
             completedStateUntil: 0,
+            completedTaskKey: "",
             completedExecutionKey: "",
             lastExecutingTaskKey: "",
             lastExecutionProgressSignature: "",
