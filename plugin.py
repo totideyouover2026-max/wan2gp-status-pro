@@ -2402,6 +2402,7 @@ class StatusProPlugin(WAN2GPPlugin):
     const MAX_IMPORT_BYTES = 20 * 1024 * 1024;
     const TICK_MS = 250;
     const IDLE_GRACE_MS = 1600;
+    const IDLE_OPERATION_SETTLE_MS = 800;
     const RESET_AFTER_MS = 3000;
     const COMPLETION_GAP_REPAIR_MS = 30000;
 
@@ -6458,6 +6459,9 @@ class StatusProPlugin(WAN2GPPlugin):
 
     function syncIdleModelLifecycle(namespace) {
         const telemetry = namespace.runTelemetry;
+        const now = Date.now();
+        const completionHolding = !namespace.activeRun && namespace.completedStateUntil &&
+            now < namespace.completedStateUntil;
         const idleEligible = telemetry && telemetry.execution_task_known === true
             ? !telemetry.executing_task
             : telemetry && telemetry.in_progress === false && !telemetry.active_task;
@@ -6467,6 +6471,15 @@ class StatusProPlugin(WAN2GPPlugin):
         }
         const lifecycle = telemetry && telemetry.model_lifecycle;
         if (!lifecycle || !/^(?:unloading|unloaded|failed)$/.test(String(lifecycle.state || ""))) {
+            const pending = namespace.idleOperation;
+            if (pending && completionHolding) return pending;
+            if (pending && pending.pendingCompletion) {
+                pending.pendingCompletion = false;
+                if (pending.state !== "failed") pending.state = "unloaded";
+                pending.clearAfter = now + IDLE_OPERATION_SETTLE_MS;
+                return pending;
+            }
+            if (pending && Number.isFinite(pending.clearAfter) && now < pending.clearAfter) return pending;
             namespace.idleOperation = null;
             return null;
         }
@@ -6476,9 +6489,18 @@ class StatusProPlugin(WAN2GPPlugin):
             token: String(lifecycle.token || "model-unload"),
             state: String(lifecycle.state),
             modelName,
-            error: String(lifecycle.error || "")
+            error: String(lifecycle.error || ""),
+            pendingCompletion: Boolean(completionHolding),
+            clearAfter: null
         };
         return namespace.idleOperation;
+    }
+
+    function presentationMode(namespace, now = Date.now()) {
+        if (namespace.activeRun) return "run";
+        if (namespace.completedStateUntil && now < namespace.completedStateUntil) return "completion";
+        if (namespace.idleOperation) return "idle-operation";
+        return "idle";
     }
 
     function authoritativeTimingActiveStage(namespace) {
@@ -9560,8 +9582,8 @@ class StatusProPlugin(WAN2GPPlugin):
             resetJob(namespace);
         }
         setActive(namespace, true);
-        if (namespace.idleOperation && !namespace.activeRun) renderIdle(namespace);
-        else if (namespace.activeRun || (namespace.completedStateUntil && now < namespace.completedStateUntil)) render(namespace);
+        const mode = presentationMode(namespace, now);
+        if (mode === "run" || mode === "completion") render(namespace);
         else renderIdle(namespace);
     }
 
