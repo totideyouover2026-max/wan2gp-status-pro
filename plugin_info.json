@@ -1,7 +1,7 @@
 {
   "name": "Status Pro",
   "author": "totideyouover2026-max",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Persistent generation status, per-step performance and memory telemetry, queue-aware history, exports, live ETA, and plugin-only download telemetry.",
   "date": "2026-09-14",
   "wan2gp_version": "0",

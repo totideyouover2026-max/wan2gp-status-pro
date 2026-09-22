@@ -2,6 +2,15 @@
 
 All notable Status Pro changes will be recorded here. Versions follow Semantic Versioning.
 
+## [1.1.2] - 2026-09-22
+
+### Fixed
+
+- Bound authoritative stage timing to task identity and execution epoch before generation callbacks can be recorded.
+- Prevented stale Save timing and native DOM status from carrying into later queued or separate generations.
+- Preserved measurable Encode activity for fast-starting queued tasks and isolated legacy fallback from authoritative V13 telemetry.
+- Prevented the completed Save view from flashing against the idle completion view after generation finishes.
+
 ## [1.1.1] - 2026-09-14
 
 ### Fixed
