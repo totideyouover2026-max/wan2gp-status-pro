@@ -61,7 +61,7 @@ The detail panel can also identify the model components involved in a stage—fo
 
 ## Understanding the timing information
 
-- **Elapsed** is how long the current stage or complete run has been active.
+- **Stage elapsed** is the time spent in the selected stage. **Total elapsed** is the time since the current run started. The total also appears in the header when the panel is collapsed.
 - **ETA** is an estimate based on measurable progress. It becomes more useful after several steps have completed.
 - **Avg step time** is a smoothed estimate from completed Generate or Enhance step updates. Sub-second stages retain decimal precision instead of being rounded to zero.
 - **Progress** is displayed only when WanGP provides meaningful units such as steps or transferred bytes.

@@ -245,6 +245,11 @@ def _task_owned_stage_id(task, raw_phase):
     """Map a callback using the model identity captured with that callback."""
     stage_id = _structured_stage_id(raw_phase)
     normalized = " ".join(str(raw_phase or "").strip().lower().replace("_", " ").replace("-", " ").split())
+    if _task_model_type(task).startswith("index_tts"):
+        if normalized.startswith(("preparing vocoder conditioning", "generating waveform")):
+            return "decode"
+        if normalized.startswith("synthesizing speech"):
+            return "denoise"
     if _task_is_yue2(task) and stage_id == "decode" and "yue2 audio decoding" not in normalized:
         if "vae decoding" in normalized or "vae decode" in normalized:
             return None
@@ -1550,6 +1555,16 @@ class StatusProPlugin(WAN2GPPlugin):
             def observed_callback(*callback_args, **callback_kwargs):
                 nonlocal last_step_at, last_skip_count, phase_index, next_sequence, current_total
                 progress_unit = callback_kwargs.get("progress_unit", callback_args[8] if len(callback_args) > 8 else None)
+                # IndexTTS reports segment progress with read_state=True, which
+                # otherwise reuses the preceding Prepare phase indefinitely.
+                if (str(progress_unit or "").strip().lower() == "segments" and
+                        _task_model_type(timing_task).startswith("index_tts")):
+                    raw_index = callback_kwargs.get("step_idx", callback_args[0] if callback_args else -1)
+                    try:
+                        segment_number = max(0, int(raw_index) + 1)
+                    except (TypeError, ValueError):
+                        segment_number = 0
+                    gen["progress_phase"] = ("Generating speech", segment_number)
                 progress_title = callback_kwargs.get("progress_title", callback_args[10] if len(callback_args) > 10 else None)
                 normalized_unit = str(progress_unit or "").strip().lower()
                 # Named phases and non-step counters are phase-local, not denoising performance.
@@ -1829,6 +1844,12 @@ class StatusProPlugin(WAN2GPPlugin):
                     self._stage_timing, timing_task_id, timing_epoch, native_phase,
                     gen.get("status"), execution_task_known,
                 )
+                if _task_model_type(executing_source if execution_task_known else fallback_source).startswith("index_tts"):
+                    self._stage_timing.observe_stage(
+                        timing_task_id,
+                        _task_owned_stage_id(executing_source if execution_task_known else fallback_source, native_phase),
+                        execution_epoch=timing_epoch,
+                    )
             elif execution_task_known:
                 self._stage_timing.finish_task(completed=False)
             if active_task and gen.get("sliding_window"):
@@ -2253,7 +2274,8 @@ class StatusProPlugin(WAN2GPPlugin):
       </div>
       <dl class="status-pro__metrics">
         <div><dt>Status</dt><dd data-sp-detail-state>Pending</dd></div>
-        <div><dt>Elapsed</dt><dd data-sp-detail-elapsed>—</dd></div>
+        <div><dt>Stage elapsed</dt><dd data-sp-detail-elapsed>—</dd></div>
+        <div><dt>Total elapsed</dt><dd data-sp-detail-total-elapsed>—</dd></div>
         <div data-sp-eta-metric><dt>Expected left</dt><dd data-sp-detail-eta>—</dd></div>
         <div data-sp-progress-metric><dt>Progress</dt><dd data-sp-detail-progress>—</dd></div>
         <div data-sp-step-metric hidden><dt>Avg step time</dt><dd data-sp-detail-step-time>—</dd></div>
@@ -3879,7 +3901,7 @@ class StatusProPlugin(WAN2GPPlugin):
 .status-pro__metrics {
     display: grid;
     flex: 0 0 auto;
-    grid-template-columns: repeat(5, minmax(72px, auto));
+    grid-template-columns: repeat(3, minmax(80px, auto));
     gap: 9px 16px;
     margin: 0;
 }
@@ -6190,6 +6212,7 @@ class StatusProPlugin(WAN2GPPlugin):
         finishHistoryPhases(namespace.state, outcome, browserStageEnded);
         run.completed_at = ended;
         run.duration_seconds = Math.max(0, Math.round((ended - run.started_at) / 100) / 10);
+        namespace.state.overallElapsed = run.duration_seconds;
         run.stages = stageDurations(namespace.state);
         finalizePerformance(run);
         run.output_records = completedOutputRecords;
@@ -6435,7 +6458,6 @@ class StatusProPlugin(WAN2GPPlugin):
     function readPrepareStatus(namespace) {
         const telemetry = namespace.runTelemetry;
         const lifecycleSnapshot = modelLifecycleSnapshot(namespace);
-        if (lifecycleSnapshot && lifecycleSnapshot.activity === "unload") return lifecycleSnapshot;
         const phase = String(telemetry && telemetry.native_progress && telemetry.native_progress.phase ||
             (Array.isArray(telemetry && telemetry.progress_phase) ? telemetry.progress_phase[0] : "") || "");
         if (isStoppingStatus(telemetry && telemetry.status)) return statusSnapshot(namespace, telemetry.status);
@@ -6443,6 +6465,8 @@ class StatusProPlugin(WAN2GPPlugin):
             return null;
         }
         const nativeSnapshot = statusSnapshot(namespace, telemetry && telemetry.status);
+        if (nativeSnapshot && nativeSnapshot.activity === "load") return nativeSnapshot;
+        if (lifecycleSnapshot && lifecycleSnapshot.activity === "unload") return lifecycleSnapshot;
         if (nativeSnapshot) return nativeSnapshot;
         return lifecycleSnapshot;
     }
@@ -6456,20 +6480,36 @@ class StatusProPlugin(WAN2GPPlugin):
         return `${steps.current}/${steps.total} ${steps.unit || "steps"}`;
     }
 
+    function displayDenoiseCounter(namespace, steps) {
+        const unit = String(steps && steps.unit || "steps").toLowerCase();
+        if (unit !== "step" && unit !== "steps") return formatCounter(steps);
+        const configured = optionalNumber(namespace.activeRun && namespace.activeRun.settings &&
+            namespace.activeRun.settings.num_inference_steps);
+        const total = optionalNumber(steps && steps.total) ??
+            optionalNumber(namespace.state.records.denoise.stepTotal) ?? configured;
+        if (!Number.isFinite(total) || total <= 0) return formatCounter(steps);
+        const completed = optionalNumber(steps && steps.current) ?? 0;
+        return formatCounter({current: Math.min(total, Math.max(1, completed + 1)), total, unit: "steps"});
+    }
+
     function readReportedPhaseStatus(namespace) {
         if (!namespace.activeRun) return null;
         const telemetry = namespace.runTelemetry;
         const native = telemetry && telemetry.native_progress;
         const reported = telemetry && telemetry.progress_phase;
-        const phase = String(native && native.phase || (Array.isArray(reported) ? reported[0] : "") || "").trim();
+        let phase = String(native && native.phase || (Array.isArray(reported) ? reported[0] : "") || "").trim();
+        const taskSettings = telemetry && telemetry.active_task && telemetry.active_task.settings;
+        const modelType = String(taskSettings && (taskSettings.model_type || taskSettings.base_model_type) || "").toLowerCase();
+        const indexTtsDecode = modelType.startsWith("index_tts") &&
+            /^(?:preparing vocoder conditioning|generating waveform)\b/i.test(phase);
         if (!phase) return null;
         const current = optionalNumber(native && native.current);
         const total = optionalNumber(native && native.total);
-        const measurable = current !== null && current >= 0 && total !== null && total > 0;
+        const measurable = !indexTtsDecode && current !== null && current >= 0 && total !== null && total > 0;
         const stablePhase = normalizedPhaseLabel(phase, {current, total, unit: native && native.unit});
         const aborting = isStoppingStatus(phase) || isStoppingStatus(telemetry && telemetry.status);
         const authoritativeV13 = Boolean(native && telemetry.execution_task_known === true);
-        const structuredId = authoritativeV13 ? structuredStageId(stablePhase) : null;
+        const structuredId = indexTtsDecode ? "decode" : (authoritativeV13 ? structuredStageId(stablePhase) : null);
         const id = aborting
             ? (namespace.state.currentId || structuredId || stageIdFor(stablePhase))
             : (structuredId || (authoritativeV13 && namespace.state.currentId) || stageIdFor(stablePhase));
@@ -9099,7 +9139,7 @@ class StatusProPlugin(WAN2GPPlugin):
             .map(([status, count]) => `${count} ${status}`).join(", ");
         text(namespace.panel, "[data-sp-live]", completed ? (allSuccessful ? "Complete" : "Queue finished") : "Ready");
         text(namespace.panel, "[data-sp-steps]", "");
-        text(namespace.panel, "[data-sp-overall]", completed ? `${formatDuration(latestDuration)}` : "");
+        text(namespace.panel, "[data-sp-overall]", completed ? `Last run ${formatDuration(latestDuration)}` : "");
         text(namespace.panel, "[data-sp-eta]", "");
         text(namespace.panel, "[data-sp-idle-title]", completed ? (allSuccessful ? "All generations complete" : "Queue finished") : "Ready to generate");
         text(namespace.panel, "[data-sp-idle-message]", completed
@@ -9408,6 +9448,12 @@ class StatusProPlugin(WAN2GPPlugin):
         container.classList.toggle("status-pro__stages--inline", container.clientWidth >= inlineWidth);
     }
 
+    function runTotalElapsed(namespace) {
+        const startedAt = optionalNumber(namespace.activeRun && namespace.activeRun.started_at);
+        if (Number.isFinite(startedAt)) return Math.max(0, (Date.now() - startedAt) / 1000);
+        return optionalNumber(namespace.state && namespace.state.overallElapsed);
+    }
+
     function renderDetail(namespace) {
         const state = namespace.state;
         const selected = state.records[state.selectedId] || state.records[state.currentId] || state.records.prepare;
@@ -9430,7 +9476,8 @@ class StatusProPlugin(WAN2GPPlugin):
                 const timing = Number.isFinite(activity.elapsed)
                     ? `${formatDuration(activity.elapsed)}${active ? " elapsed" : ""}`
                     : (active ? "Running" : "Completed");
-                const counter = formatCounter(activity);
+                const counter = selected.id === "denoise"
+                    ? displayDenoiseCounter(namespace, activity) : formatCounter(activity);
                 line.textContent = `${icon} ${activity.label}${counter ? ` · ${counter}` : ""} · ${timing}`;
                 activityElement.appendChild(line);
             });
@@ -9465,6 +9512,8 @@ class StatusProPlugin(WAN2GPPlugin):
         }
         text(namespace.panel, "[data-sp-detail-state]", statusLabel(selected));
         text(namespace.panel, "[data-sp-detail-elapsed]", Number.isFinite(selected.elapsed) ? formatDuration(selected.elapsed) : "—");
+        const totalElapsed = runTotalElapsed(namespace);
+        text(namespace.panel, "[data-sp-detail-total-elapsed]", Number.isFinite(totalElapsed) ? formatDuration(totalElapsed) : "—");
         text(namespace.panel, "[data-sp-detail-eta]", etaText);
         text(namespace.panel, "[data-sp-detail-progress]", Number.isFinite(selected.progress) ? `${selected.progress.toFixed(1)}%` : "—");
         const etaMetric = namespace.panel.querySelector("[data-sp-eta-metric]");
@@ -9503,8 +9552,11 @@ class StatusProPlugin(WAN2GPPlugin):
         if (idle) idle.hidden = true;
         if (running) running.hidden = false;
         text(namespace.panel, "[data-sp-live]", downloading ? "Downloading model files" : (current ? (current.rawName || current.label) : "Waiting for progress"));
-        text(namespace.panel, "[data-sp-steps]", formatCounter(state.steps));
-        text(namespace.panel, "[data-sp-overall]", Number.isFinite(state.overallElapsed) ? `${formatDuration(state.overallElapsed)} elapsed` : "");
+        text(namespace.panel, "[data-sp-steps]", current && current.id === "denoise"
+            ? displayDenoiseCounter(namespace, state.steps) : formatCounter(state.steps));
+        const totalElapsed = runTotalElapsed(namespace);
+        text(namespace.panel, "[data-sp-overall]", Number.isFinite(totalElapsed)
+            ? `Total elapsed ${formatDuration(totalElapsed)}` : "");
         const downloadEta = downloading ? downloadHeaderEta(namespace.download) : null;
         const eta = downloading ? downloadEta : totalEta(state);
         const showEta = downloading ? Number.isFinite(downloadEta) : stageSupportsEta(current);
@@ -9564,11 +9616,15 @@ class StatusProPlugin(WAN2GPPlugin):
             telemetry.executing_task && namespace.activeRun &&
             String(telemetry.executing_task.id) === String(namespace.activeRun.queue_task_id);
         if (authoritativeTask && !downloading) {
+            const timingStage = authoritativeTimingActiveStage(namespace);
+            const nativePhase = String(telemetry.native_progress && telemetry.native_progress.phase || "");
+            const loadingSnapshot = statusSnapshot(namespace, telemetry && telemetry.status);
+            if (loadingSnapshot && loadingSnapshot.activity === "load" &&
+                timingStage === "prepare" && (!nativePhase || stageIdFor(nativePhase) === "prepare")) return loadingSnapshot;
             const lifecycleSnapshot = lifecycle && lifecycle.state === "unloading"
                 ? modelLifecycleSnapshot(namespace) : null;
             if (lifecycleSnapshot) return lifecycleSnapshot;
             if (isStoppingStatus(telemetry.status)) return statusSnapshot(namespace, telemetry.status);
-            const timingStage = authoritativeTimingActiveStage(namespace);
             const taskOwned = readReportedPhaseStatus(namespace);
             return taskOwned && taskOwned.transitionEvidence === "structured" && taskOwned.id === timingStage
                 ? taskOwned
