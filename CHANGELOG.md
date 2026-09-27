@@ -18,6 +18,7 @@ All notable Status Pro changes will be recorded here. Versions follow Semantic V
 ### Fixed
 
 - Prevented an Encode layer counter from appearing during Denoising.
+- Restarted stage timing at each sliding-window boundary so Save from one window cannot hide progress in the next.
 
 ## [1.1.2] - 2026-09-22
 
