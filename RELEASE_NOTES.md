@@ -1,4 +1,8 @@
-# Status Pro v1.2.0
+# Status Pro v1.2.1
+
+Status Pro 1.2.1 fixes live progress across sliding windows. Stage timing now starts fresh when Wan2GP advances to the next window within the same task, so Save from an earlier window cannot hide later Encode or Generate activity. Status Lite includes the same fix.
+
+## Status Pro v1.2.0
 
 Status Pro 1.2.0 adds total elapsed time and clearer live progress. Denoising displays `Step n/N` from the first active step; Encode layer and VAE tile counts stay with their own phases. IndexTTS reports its available stages, and task transitions distinguish outgoing model unloading from incoming model loading.
 
