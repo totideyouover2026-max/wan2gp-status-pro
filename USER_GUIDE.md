@@ -64,6 +64,7 @@ The detail panel can also identify the model components involved in a stage—fo
 - **Stage elapsed** appears on the selected stage card and in its activity details. **Total elapsed** appears in the header, including when the panel is collapsed.
 - **ETA** is an estimate based on measurable progress. It becomes more useful after several steps have completed.
 - **Avg step time** is a smoothed estimate from completed Generate or Enhance step updates. Sub-second stages retain decimal precision instead of being rounded to zero.
+- On the final denoising step, the ETA counts down from recent completed step times when enough samples are available. It says **Nearly done** if the estimate expires before WanGP reports the next stage.
 - **Progress** is displayed only when WanGP provides meaningful units such as steps or transferred bytes.
 
 **Steps** is the configured number for each denoising pass. **Step observations** is the amount of work Status Pro actually saw across every pass. These can differ: MiniMax H3's offline Spectrum mode performs an anchor-capture pass and then a smoothing-replay pass, so a 20-step configuration can correctly produce 40 observations shown as **2 × 20 configured steps**. If passes contain different observed counts, history shows the actual split, such as **2 passes · 8 + 3 observations**. The `res_multistep` sampler changes the update method inside those steps; it does not create the second pass.

@@ -5053,6 +5053,8 @@ class StatusProPlugin(WAN2GPPlugin):
             lastStepAt: null,
             stepSamples: [],
             stepSeconds: null,
+            finalStepStartedAt: null,
+            finalStepDuration: null,
             recovered: false
         }]));
     }
@@ -7115,6 +7117,8 @@ class StatusProPlugin(WAN2GPPlugin):
             record.lastStepAt = now;
             record.stepSamples = [];
             record.stepSeconds = null;
+            record.finalStepStartedAt = null;
+            record.finalStepDuration = null;
             return;
         }
 
@@ -7135,6 +7139,12 @@ class StatusProPlugin(WAN2GPPlugin):
         record.stepSeconds = sorted.length % 2
             ? sorted[middle]
             : (sorted[middle - 1] + sorted[middle]) / 2;
+        const unit = String(steps && steps.unit || "steps").toLowerCase();
+        if (record.id === "denoise" && ["step", "steps"].includes(unit) &&
+            Number.isFinite(total) && current === total - 1 && sorted.length >= 2) {
+            record.finalStepStartedAt = now;
+            record.finalStepDuration = record.stepSeconds;
+        }
     }
 
     function applySnapshot(namespace, snapshot) {
@@ -7190,6 +7200,8 @@ class StatusProPlugin(WAN2GPPlugin):
             next.lastStepAt = null;
             next.stepSamples = [];
             next.stepSeconds = null;
+            next.finalStepStartedAt = null;
+            next.finalStepDuration = null;
             next.recovered = Boolean(recoveredBaseline);
             if (!activeState.selectionIsManual || !activeState.selectedId) activeState.selectedId = snapshot.id;
         }
@@ -7238,6 +7250,8 @@ class StatusProPlugin(WAN2GPPlugin):
         if (record.state === "complete") return formatDuration(liveElapsed);
         if (record.state === "aborting") return Number.isFinite(liveElapsed) ? `${formatDuration(liveElapsed)} elapsed` : "Stopping…";
         if (record.state === "current") {
+            const finalStep = finalDenoiseStepCountdown(record);
+            if (finalStep) return finalStep === "Nearly done" ? finalStep : `${finalStep} left`;
             const remaining = remainingEstimate(state, record);
             if (Number.isFinite(remaining)) return `${formatDuration(remaining, true)} left`;
             return Number.isFinite(liveElapsed) ? `${formatDuration(liveElapsed)} elapsed` : "Calculating…";
@@ -7284,6 +7298,16 @@ class StatusProPlugin(WAN2GPPlugin):
     function totalEta(state) {
         const current = state.records[state.currentId];
         return current ? remainingEstimate(state, current) : null;
+    }
+
+    function finalDenoiseStepCountdown(record, now = Date.now()) {
+        if (!record || record.id !== "denoise" || record.state !== "current" ||
+            !Number.isFinite(record.stepCurrent) || !Number.isFinite(record.stepTotal) ||
+            record.stepCurrent !== record.stepTotal - 1 ||
+            !Number.isFinite(record.finalStepStartedAt) ||
+            !Number.isFinite(record.finalStepDuration) || record.finalStepDuration <= 0) return null;
+        const remaining = record.finalStepDuration - Math.max(0, (now - record.finalStepStartedAt) / 1000);
+        return remaining <= 1 ? "Nearly done" : formatDuration(remaining, true);
     }
 
     function text(root, selector, value) {
@@ -9463,6 +9487,8 @@ class StatusProPlugin(WAN2GPPlugin):
         const remaining = remainingEstimate(state, selected);
         if (selected.state === "current" && Number.isFinite(remaining)) etaText = formatDuration(remaining, true);
         else if (selected.state === "current" && stageSupportsEta(selected)) etaText = "Calculating…";
+        const finalStep = finalDenoiseStepCountdown(selected);
+        if (finalStep) etaText = finalStep;
 
         text(namespace.panel, "[data-sp-detail-name]", stageDisplayLabel(namespace, selected));
         const activityElement = namespace.panel.querySelector("[data-sp-detail-activities]");
@@ -9558,8 +9584,11 @@ class StatusProPlugin(WAN2GPPlugin):
         const downloadEta = downloading ? downloadHeaderEta(namespace.download) : null;
         const eta = downloading ? downloadEta : totalEta(state);
         const showEta = downloading ? Number.isFinite(downloadEta) : stageSupportsEta(current);
+        const finalStep = !downloading && finalDenoiseStepCountdown(current);
         text(namespace.panel, "[data-sp-eta]", showEta
-            ? (downloading ? `~${formatDuration(eta)} transfer ETA` : `${formatDuration(eta, true)} ETA`)
+            ? (downloading ? `~${formatDuration(eta)} transfer ETA`
+                : finalStep ? (finalStep === "Nearly done" ? finalStep : `${finalStep} ETA`)
+                    : `${formatDuration(eta, true)} ETA`)
             : "");
         const overallFill = namespace.panel.querySelector("[data-sp-overall-fill]");
         if (overallFill) {
