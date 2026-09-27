@@ -53,7 +53,7 @@ The stages shown depend on the model and options being used. Optional stages app
 
 Some models perform several Inputs, Generate, or Decode phases. Status Pro records the individual phases while keeping the main row easy to read.
 
-WanGP V13 can expose richer activity counters such as `Encoding Text Prompt · 50/50 layers`, `Denoising · 8/8 steps`, and `VAE Decoding · 28/28 tiles`. These remain details inside the same seven stages; they do not add new top-level stages. Repeated activities, including multiple prompts, passes, and windows, remain individually visible.
+WanGP V13 can expose richer activity counters such as `Encoding Text Prompt · 50/50 layers`, `Denoising · Step 8/8`, and `VAE Decoding · 28/28 tiles`. These remain details inside the same seven stages; they do not add new top-level stages. Repeated activities, including multiple prompts, passes, and windows, remain individually visible.
 
 The detail panel can also identify the model components involved in a stage—for example the transformer during Prepare, an input VAE during Inputs, text encoders during Encode, and output VAEs during Decode. Status Pro shows concise filenames rather than full local paths or download URLs. When several components are involved, they are listed one per line. Repeated work, such as a pipeline alternating between Inputs and Encode, is retained as separate activity lines with cumulative stage timing.
 
@@ -61,7 +61,7 @@ The detail panel can also identify the model components involved in a stage—fo
 
 ## Understanding the timing information
 
-- **Stage elapsed** is the time spent in the selected stage. **Total elapsed** is the time since the current run started. The total also appears in the header when the panel is collapsed.
+- **Stage elapsed** appears on the selected stage card and in its activity details. **Total elapsed** appears in the header, including when the panel is collapsed.
 - **ETA** is an estimate based on measurable progress. It becomes more useful after several steps have completed.
 - **Avg step time** is a smoothed estimate from completed Generate or Enhance step updates. Sub-second stages retain decimal precision instead of being rounded to zero.
 - **Progress** is displayed only when WanGP provides meaningful units such as steps or transferred bytes.

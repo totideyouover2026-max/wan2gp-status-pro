@@ -2579,10 +2579,10 @@ function element(tag="div"){
 globalThis.document={createElement:element};
 ok(api.normalizePlannedStages(["Prepare","Generate","Enhance"]).join(",")==="prepare,denoise,post","display aliases created noncanonical stage IDs");
 const countState={state:api.freshState(),activeRun:{settings:{num_inference_steps:8}}};
-ok(api.displayDenoiseCounter(countState,{current:null,total:null,unit:"steps"})==="1/8 steps","first running step was blank");
-ok(api.displayDenoiseCounter(countState,{current:1,total:8,unit:"steps"})==="2/8 steps","completed step 1 did not show running step 2");
-ok(api.displayDenoiseCounter(countState,{current:7,total:8,unit:"steps"})==="8/8 steps","final running step was not shown");
-ok(api.displayDenoiseCounter(countState,{current:8,total:8,unit:"steps"})==="8/8 steps","display exceeded configured steps");
+ok(api.displayDenoiseCounter(countState,{current:null,total:null,unit:"steps"})==="Step 1/8","first running step was blank");
+ok(api.displayDenoiseCounter(countState,{current:1,total:8,unit:"steps"})==="Step 2/8","completed step 1 did not show running step 2");
+ok(api.displayDenoiseCounter(countState,{current:7,total:8,unit:"steps"})==="Step 8/8","final running step was not shown");
+ok(api.displayDenoiseCounter(countState,{current:8,total:8,unit:"steps"})==="Step 8/8","display exceeded configured steps");
 ok(api.displayDenoiseCounter(countState,{current:1,total:8,unit:"segments"})==="1/8 segments","non-denoise unit was changed");
 const elapsedState={state:api.freshState(),activeRun:{started_at:Date.now()-5000}};
 ok(Math.abs(api.runTotalElapsed(elapsedState)-5)<0.5,"live total elapsed did not use run start time");

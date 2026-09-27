@@ -40,7 +40,7 @@ assert(api.aggregateStageDurations(duplicated).encode === 2, "duplicate phase ID
 assert(Object.values(api.aggregateStageDurations({bad:null, unknown:{label:"Other", duration_seconds:NaN}})).every(v=>v===0), "malformed legacy phases crash or invent duration");
 assert(api.historyPhaseChipText(phases["encode:text"]).includes("32/32 layers"), "layer counter missing");
 assert(api.historyPhaseChipText(phases["decode:vae"]).includes("12/12 tiles"), "tile counter missing");
-assert(api.historyPhaseChipText(phases["denoise:main"]).includes("8/8 steps"), "step counter missing");
+assert(api.historyPhaseChipText(phases["denoise:main"]).includes("Step 8/8"), "step counter missing");
 assert(!api.historyPhaseChipText(phases["prepare:loading"]).includes("/"), "fabricated counter");
 const multi = {first:{stage:"encode", label:"Encoding Text Prompt 1/2", duration_seconds:3}, second:{stage:"encode", label:"Encoding Text Prompt 2/2", duration_seconds:4}};
 assert(api.recordedPhaseEntries(multi).length === 2 && api.aggregateStageDurations(multi).encode === 7, "multi-prompt phases collapsed");
