@@ -3900,7 +3900,7 @@ class StatusProPlugin(WAN2GPPlugin):
 .status-pro__metrics {
     display: grid;
     flex: 0 0 auto;
-    grid-template-columns: repeat(3, minmax(80px, auto));
+    grid-template-columns: repeat(4, minmax(80px, auto));
     gap: 9px 16px;
     margin: 0;
 }
@@ -7094,6 +7094,10 @@ class StatusProPlugin(WAN2GPPlugin):
         const nativeEta = optionalNumber(record.nativeEta);
         record.eta = clamp(Number.isFinite(nativeEta) ? nativeEta : fallbackEta, 0, 86400);
         record.stepSeconds = (record.elapsed + record.eta) / record.stepTotal;
+        if (Number.isFinite(record.finalStepStartedAt) && !Number.isFinite(record.finalStepDuration) &&
+            Number.isFinite(record.stepSeconds) && record.stepSeconds > 0) {
+            record.finalStepDuration = record.stepSeconds;
+        }
     }
 
     function updateStepTiming(record, steps, now = Date.now()) {
@@ -7144,7 +7148,7 @@ class StatusProPlugin(WAN2GPPlugin):
         if (record.id === "denoise" && ["step", "steps"].includes(unit) &&
             Number.isFinite(total) && current === total - 1 && sorted.length >= 2) {
             record.finalStepStartedAt = now;
-            record.finalStepDuration = record.stepSeconds;
+            record.finalStepDuration = null;
         }
     }
 
