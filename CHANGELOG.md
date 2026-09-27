@@ -2,6 +2,23 @@
 
 All notable Status Pro changes will be recorded here. Versions follow Semantic Versioning.
 
+## [1.2.0] - 2026-09-27
+
+### Added
+
+- Added total elapsed time to the header and a display-only countdown for the final denoising step, starting from the displayed average step time.
+- Improved IndexTTS stage reporting and the display of model unloading and loading during task transitions.
+
+### Changed
+
+- Display denoising as `Step n/N`, including the first active step; keep layer and tile counters with their own phases.
+- Put the expanded status metrics on one row on wide panels and removed duplicate elapsed-time metrics.
+- Updated Status Lite with the shared live-status changes.
+
+### Fixed
+
+- Prevented an Encode layer counter from appearing during Denoising.
+
 ## [1.1.2] - 2026-09-22
 
 ### Fixed
