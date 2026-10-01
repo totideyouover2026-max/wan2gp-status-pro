@@ -241,9 +241,15 @@ def _task_is_yue2_hum(task, settings=None):
     return _task_model_type(task, settings).startswith("yue2_hum")
 
 
-def _task_owned_stage_id(task, raw_phase):
+def _task_owned_stage_id(task, raw_phase, stage_timing=None):
     """Map a callback using the model identity captured with that callback."""
     stage_id = _structured_stage_id(raw_phase)
+    if (stage_id == "decode" and stage_timing is not None and
+            _task_model_type(task).startswith("minimax_h3_ref2va")):
+        timing = stage_timing.snapshot(task.get("id") if isinstance(task, dict) else None)
+        stages = timing.get("stages", {})
+        if not any(stages.get(name, {}).get("run_count") for name in ("encode", "denoise")):
+            return "input"
     normalized = " ".join(str(raw_phase or "").strip().lower().replace("_", " ").replace("-", " ").split())
     if _task_model_type(task).startswith("index_tts"):
         if normalized.startswith(("preparing vocoder conditioning", "generating waveform")):
@@ -1619,7 +1625,7 @@ class StatusProPlugin(WAN2GPPlugin):
                         phase_state = gen.get("progress_phase")
                         phase_label = phase_state[0] if isinstance(phase_state, (list, tuple)) and phase_state else ""
                         stage_timing.observe_stage(
-                            task_id, _task_owned_stage_id(timing_task, progress_title or phase_label),
+                            task_id, _task_owned_stage_id(timing_task, progress_title or phase_label, stage_timing),
                             execution_epoch=execution_epoch
                         )
                     return result
@@ -1652,7 +1658,7 @@ class StatusProPlugin(WAN2GPPlugin):
                             task_id,
                             _task_owned_stage_id(
                                 timing_task,
-                                phase_state[0] if isinstance(phase_state, (list, tuple)) and phase_state else "",
+                                phase_state[0] if isinstance(phase_state, (list, tuple)) and phase_state else "", stage_timing,
                             ),
                             execution_epoch=execution_epoch,
                         )
@@ -1702,7 +1708,7 @@ class StatusProPlugin(WAN2GPPlugin):
                         task_id,
                         _task_owned_stage_id(
                             timing_task,
-                            phase_state[0] if isinstance(phase_state, (list, tuple)) and phase_state else "",
+                            phase_state[0] if isinstance(phase_state, (list, tuple)) and phase_state else "", stage_timing,
                         ),
                         execution_epoch=execution_epoch,
                     )
@@ -1757,7 +1763,7 @@ class StatusProPlugin(WAN2GPPlugin):
                         phase = data[1]
                     if command in ("status", "progress"):
                         self._stage_timing.observe_stage(
-                            task_id, _task_owned_stage_id(task, phase), execution_epoch=execution_epoch
+                            task_id, _task_owned_stage_id(task, phase, self._stage_timing), execution_epoch=execution_epoch
                         )
                     if command == "output" and task_outcomes is not None:
                         task_outcomes.capture_outputs(task_id, execution_epoch, task_outputs())
@@ -1895,7 +1901,8 @@ class StatusProPlugin(WAN2GPPlugin):
                 if _task_model_type(executing_source if execution_task_known else fallback_source).startswith("index_tts"):
                     self._stage_timing.observe_stage(
                         timing_task_id,
-                        _task_owned_stage_id(executing_source if execution_task_known else fallback_source, native_phase),
+                        _task_owned_stage_id(executing_source if execution_task_known else fallback_source, native_phase,
+                                             self._stage_timing),
                         execution_epoch=timing_epoch,
                     )
             elif execution_task_known:
@@ -6556,7 +6563,9 @@ class StatusProPlugin(WAN2GPPlugin):
         const reported = telemetry && telemetry.progress_phase;
         let phase = String(native && native.phase || (Array.isArray(reported) ? reported[0] : "") || "").trim();
         const taskSettings = telemetry && telemetry.active_task && telemetry.active_task.settings;
-        const modelType = String(taskSettings && (taskSettings.model_type || taskSettings.base_model_type) || "").toLowerCase();
+        const runSettings = namespace.activeRun && namespace.activeRun.settings;
+        const modelType = String(taskSettings && (taskSettings.model_type || taskSettings.base_model_type) ||
+            runSettings && (runSettings.model_type || runSettings.base_model_type) || "").toLowerCase();
         const indexTtsDecode = modelType.startsWith("index_tts") &&
             /^(?:preparing vocoder conditioning|generating waveform)\b/i.test(phase);
         if (!phase) return null;
@@ -6566,7 +6575,9 @@ class StatusProPlugin(WAN2GPPlugin):
         const stablePhase = normalizedPhaseLabel(phase, {current, total, unit: native && native.unit});
         const aborting = isStoppingStatus(phase) || isStoppingStatus(telemetry && telemetry.status);
         const authoritativeV13 = Boolean(native && telemetry.execution_task_known === true);
-        const structuredId = indexTtsDecode ? "decode" : (authoritativeV13 ? structuredStageId(stablePhase) : null);
+        let structuredId = indexTtsDecode ? "decode" : (authoritativeV13 ? structuredStageId(stablePhase) : null);
+        if (structuredId === "decode" && modelType.startsWith("minimax_h3_ref2va") &&
+            authoritativeTimingActiveStage(namespace) === "input") structuredId = "input";
         const id = aborting
             ? (namespace.state.currentId || structuredId || stageIdFor(stablePhase))
             : (structuredId || (authoritativeV13 && namespace.state.currentId) || stageIdFor(stablePhase));
