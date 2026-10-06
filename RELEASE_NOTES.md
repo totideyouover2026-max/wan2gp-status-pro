@@ -1,4 +1,8 @@
-# Status Pro v1.2.1
+# Status Pro v1.2.2
+
+Status Pro 1.2.2 keeps H3 RefMod preview decoding in Encode and tracks each additional sample requested with One More. History keeps Step observations open during updates and no longer shortens a run using output timing that predates observed work. Status Lite includes the live-stage fixes.
+
+## Status Pro v1.2.1
 
 Status Pro 1.2.1 fixes live progress across sliding windows. Stage timing now starts fresh when Wan2GP advances to the next window within the same task, so Save from an earlier window cannot hide later Encode or Generate activity. Status Lite includes the same fix.
 

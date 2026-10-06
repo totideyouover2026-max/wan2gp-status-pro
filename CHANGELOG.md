@@ -2,6 +2,15 @@
 
 All notable Status Pro changes will be recorded here. Versions follow Semantic Versioning.
 
+## [1.2.2] - 2026-10-06
+
+### Fixed
+
+- Kept MiniMax H3 Ref2VA RefMod preview decoding in Encode until generation begins; output decoding remains in Decode.
+- Restarted live tracking for each sample added with WanGP's One More button, even when the queue task stays the same.
+- Preserved the Step observations panel's open state across History updates and avoided redraws for unchanged task outcomes.
+- Prevented stale output timing metadata from shortening a run below its recorded step observations.
+
 ## [1.2.1] - 2026-09-27
 
 ### Fixed
