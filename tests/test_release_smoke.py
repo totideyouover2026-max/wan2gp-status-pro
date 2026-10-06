@@ -1881,6 +1881,19 @@ const startedAt = 1700000000000;
 const actualDuration = 14 * 60 + 36;
 const resumedAt = startedAt + actualDuration * 1000 + 90 * 60 * 1000;
 const baseRun = {started_at: startedAt, total_windows: null};
+const activeRun = {started_at: startedAt, total_windows: null,
+  step_performance: [{completed_at: (startedAt + 3 * 60 * 1000) / 1000}]};
+const activeEnded = api.inferredRunCompletionTime(activeRun, {status: ""}, startedAt + 4 * 60 * 1000,
+  [{path: "outputs/active.mp4", settings: {generation_time: 81}}]);
+if (activeEnded !== startedAt + 4 * 60 * 1000) {
+  throw new Error("short output generation_time overrode later observed steps");
+}
+const staleTimestampEnded = api.inferredRunCompletionTime(activeRun, {status: ""}, startedAt + 4 * 60 * 1000,
+  [{path: "outputs/active.mp4", settings: {
+    creation_timestamp: (startedAt + 81 * 1000) / 1000, generation_time: 81}}]);
+if (staleTimestampEnded !== startedAt + 4 * 60 * 1000) {
+  throw new Error("stale output timestamp overrode later observed steps");
+}
 
 const statusEnded = api.inferredRunCompletionTime(
   baseRun,
@@ -2415,6 +2428,49 @@ api.reconcileTaskOutcomes(history,{task_outcomes:[
 ok(history.runHistory[1].outputs.join()==="outputs/a.png","late Task A output did not enrich Task A");
 ok(!history.runHistory[1].status_reason&&!history.runHistory[1].failure_reason,"late authoritative success retained Error outcome detail");
 ok(history.runHistory[0].outputs.length===0,"late Task A output attached to Task B");
+ok(api.reconcileTaskOutcomes(history,{task_outcomes:[
+ {task_id:"A",execution_epoch:21,known:true,success:true,aborted:false,
+  output_records:[{path:"outputs/a.png",media_type:"image",settings:{prompt:"A"}}]}
+]})===false,"unchanged task outcome forced another history render");
+const sparseOutcome={task_id:"A",execution_epoch:21,known:true,success:true,aborted:false,
+ output_records:[{path:"outputs/a.png",settings:{prompt:"A"}}]};
+ok(api.reconcileTaskOutcomes(history,{task_outcomes:[sparseOutcome]})===false,
+ "normalized media fields caused repeated history renders");
+'''
+        result = subprocess.run([node, "-"], input=javascript + "\n" + script,
+                                text=True, encoding="utf-8", capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_step_observations_stay_open_after_history_render(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node is required for history interaction validation")
+        javascript = _javascript_with_exports("appendStepPerformance")
+        script = r'''
+const api = globalThis.__statusProReleaseTest;
+class Element {
+  constructor(tag) { this.tag = tag; this.children = []; this.dataset = {}; this.listeners = {}; this.open = false; }
+  append(...nodes) { this.children.push(...nodes); }
+  appendChild(node) { this.children.push(node); return node; }
+  addEventListener(name, callback) { this.listeners[name] = callback; }
+  setAttribute() {}
+}
+globalThis.document = {createElement: tag => new Element(tag)};
+const namespace = {openStepLogs: new Set()};
+const run = {id: "run-1", step_performance: [{step: 1, total_steps: 2, duration_seconds: 4, skipped: false}]};
+const firstBody = new Element("div");
+api.appendStepPerformance(namespace, firstBody, run);
+const first = firstBody.children[0];
+first.open = true;
+first.listeners.toggle();
+const secondBody = new Element("div");
+api.appendStepPerformance(namespace, secondBody, run);
+if (!secondBody.children[0].open) throw new Error("open observations collapsed after re-render");
+secondBody.children[0].open = false;
+secondBody.children[0].listeners.toggle();
+const thirdBody = new Element("div");
+api.appendStepPerformance(namespace, thirdBody, run);
+if (thirdBody.children[0].open) throw new Error("closed observations reopened after re-render");
 '''
         result = subprocess.run([node, "-"], input=javascript + "\n" + script,
                                 text=True, encoding="utf-8", capture_output=True, check=False)

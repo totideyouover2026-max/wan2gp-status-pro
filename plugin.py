@@ -248,8 +248,10 @@ def _task_owned_stage_id(task, raw_phase, stage_timing=None):
             _task_model_type(task).startswith("minimax_h3_ref2va")):
         timing = stage_timing.snapshot(task.get("id") if isinstance(task, dict) else None)
         stages = timing.get("stages", {})
-        if not any(stages.get(name, {}).get("run_count") for name in ("encode", "denoise")):
-            return "input"
+        # RefMod preview decoding can occur after prompt encoding starts.
+        # The first denoising callback separates conditioning from output decode.
+        if not stages.get("denoise", {}).get("run_count"):
+            return "encode"
     normalized = " ".join(str(raw_phase or "").strip().lower().replace("_", " ").replace("-", " ").split())
     if _task_model_type(task).startswith("index_tts"):
         if normalized.startswith(("preparing vocoder conditioning", "generating waveform")):
@@ -4837,7 +4839,7 @@ class StatusProPlugin(WAN2GPPlugin):
 
     function pruneHistoryReferences(namespace) {
         const ids = new Set(namespace.runHistory.map(run => String(run.id)));
-        for (const key of ["sessionRunIds", "selectedRunIds", "openHistoryRuns"]) {
+        for (const key of ["sessionRunIds", "selectedRunIds", "openHistoryRuns", "openStepLogs"]) {
             if (namespace[key]) namespace[key] = new Set(Array.from(namespace[key]).filter(id => ids.has(String(id))));
         }
         if (namespace.recoverablePrompts) {
@@ -5496,11 +5498,21 @@ class StatusProPlugin(WAN2GPPlugin):
             const records = Array.isArray(outcome.output_records) ? cloneJson(outcome.output_records, []) : [];
             if (records.length) {
                 const existing = new Map((run.output_records || []).map(record => [String(record.path || ""), record]));
-                records.forEach(record => existing.set(String(record.path || ""), record));
-                run.output_records = Array.from(existing.values()).filter(record => record && record.path);
-                run.outputs = run.output_records.map(record => String(record.path));
-                normalizeRunMedia(run);
-                changed = true;
+                records.forEach(record => {
+                    const path = String(record.path || "");
+                    const previous = existing.get(path);
+                    existing.set(path, previous ? {
+                        ...previous, ...record,
+                        settings: {...(previous.settings || {}), ...(record.settings || {})}
+                    } : record);
+                });
+                const updated = Array.from(existing.values()).filter(record => record && record.path);
+                if (JSON.stringify(updated) !== JSON.stringify(run.output_records || [])) {
+                    run.output_records = updated;
+                    run.outputs = updated.map(record => String(record.path));
+                    normalizeRunMedia(run);
+                    changed = true;
+                }
             }
         });
         if (changed && namespace.historyRecording !== false) persistRunHistory(namespace);
@@ -5608,6 +5620,14 @@ class StatusProPlugin(WAN2GPPlugin):
         return durations.length ? Math.max(...durations) : null;
     }
 
+    function latestStepObservationTimestamp(run) {
+        const startedAt = optionalNumber(run && run.started_at);
+        const timestamps = (Array.isArray(run && run.step_performance) ? run.step_performance : [])
+            .map(step => optionalNumber(step && step.completed_at))
+            .filter(value => Number.isFinite(value) && (!Number.isFinite(startedAt) || value * 1000 >= startedAt));
+        return timestamps.length ? Math.max(...timestamps) * 1000 : null;
+    }
+
     function reportedQueueDuration(telemetry) {
         if (telemetry && telemetry.active_task) return null;
         const status = String(telemetry && telemetry.status || "");
@@ -5619,17 +5639,21 @@ class StatusProPlugin(WAN2GPPlugin):
         const fallback = Number.isFinite(observedAt) ? observedAt : Date.now();
         const startedAt = optionalNumber(run && run.started_at);
         const windowed = optionalNumber(run && run.total_windows) > 1;
+        const latestStep = latestStepObservationTimestamp(run);
         const outputCompletion = outputCompletionTimestamp(run, records, fallback);
-        if (Number.isFinite(outputCompletion)) return outputCompletion;
+        if (Number.isFinite(outputCompletion) &&
+            (!Number.isFinite(latestStep) || outputCompletion >= latestStep - 1000)) return outputCompletion;
         const generationDuration = windowed ? null : outputGenerationDuration(records);
         if (Number.isFinite(startedAt) && Number.isFinite(generationDuration)) {
             const generatedCompletion = startedAt + generationDuration * 1000;
-            if (generatedCompletion >= startedAt && generatedCompletion <= fallback + 1000) return generatedCompletion;
+            if (generatedCompletion >= startedAt && generatedCompletion <= fallback + 1000 &&
+                (!Number.isFinite(latestStep) || generatedCompletion >= latestStep - 1000)) return generatedCompletion;
         }
         const reportedDuration = windowed ? null : reportedQueueDuration(telemetry);
         if (Number.isFinite(startedAt) && Number.isFinite(reportedDuration)) {
             const reportedCompletion = startedAt + reportedDuration * 1000;
-            if (reportedCompletion >= startedAt && reportedCompletion <= fallback + 1000) return reportedCompletion;
+            if (reportedCompletion >= startedAt && reportedCompletion <= fallback + 1000 &&
+                (!Number.isFinite(latestStep) || reportedCompletion >= latestStep - 1000)) return reportedCompletion;
         }
         return fallback;
     }
@@ -6001,6 +6025,10 @@ class StatusProPlugin(WAN2GPPlugin):
         if (!Number.isFinite(startedAt) || !Number.isFinite(completedAt) || completedAt < startedAt) return false;
         const records = Array.isArray(run.output_records) ? run.output_records : [];
         let correctedAt = outputCompletionTimestamp(run, records, completedAt);
+        const latestStep = latestStepObservationTimestamp(run);
+        if (Number.isFinite(correctedAt) && Number.isFinite(latestStep) && correctedAt < latestStep - 1000) {
+            correctedAt = null;
+        }
         if (!Number.isFinite(correctedAt) && optionalNumber(run.total_windows) <= 1) {
             const generationDuration = outputGenerationDuration(records) ?? optionalNumber(setting(run.settings || {}, "generation_time"));
             if (Number.isFinite(generationDuration) && generationDuration >= 0 && generationDuration <= 86400) {
@@ -6009,6 +6037,7 @@ class StatusProPlugin(WAN2GPPlugin):
         }
         if (
             !Number.isFinite(correctedAt) || correctedAt < startedAt || correctedAt > completedAt ||
+            (Number.isFinite(latestStep) && correctedAt < latestStep - 1000) ||
             completedAt - correctedAt <= COMPLETION_GAP_REPAIR_MS
         ) return false;
 
@@ -6596,7 +6625,7 @@ class StatusProPlugin(WAN2GPPlugin):
         const authoritativeV13 = Boolean(native && telemetry.execution_task_known === true);
         let structuredId = indexTtsDecode ? "decode" : (authoritativeV13 ? structuredStageId(stablePhase) : null);
         if (structuredId === "decode" && modelType.startsWith("minimax_h3_ref2va") &&
-            authoritativeTimingActiveStage(namespace) === "input") structuredId = "input";
+            authoritativeTimingActiveStage(namespace) === "encode") structuredId = "encode";
         const id = aborting
             ? (namespace.state.currentId || structuredId || stageIdFor(stablePhase))
             : (structuredId || (authoritativeV13 && namespace.state.currentId) || stageIdFor(stablePhase));
@@ -7975,12 +8004,18 @@ class StatusProPlugin(WAN2GPPlugin):
         return `${observedPasses} passes`;
     }
 
-    function appendStepPerformance(body, run) {
+    function appendStepPerformance(namespace, body, run) {
         const steps = Array.isArray(run.step_performance) ? run.step_performance : [];
         if (!steps.length) return;
         const skippedCount = steps.filter(stepIsSkipped).length;
         const details = document.createElement("details");
         details.className = "status-pro__step-log";
+        const openStepLogs = namespace.openStepLogs ||= new Set();
+        details.open = openStepLogs.has(String(run.id));
+        details.addEventListener("toggle", () => {
+            if (details.open) openStepLogs.add(String(run.id));
+            else openStepLogs.delete(String(run.id));
+        });
         const summary = document.createElement("summary");
         const label = document.createElement("span");
         label.textContent = `Step observations (${steps.length})`;
@@ -8302,7 +8337,7 @@ class StatusProPlugin(WAN2GPPlugin):
                 stages.appendChild(chip);
             }
             if (stages.childElementCount) body.appendChild(stages);
-            appendStepPerformance(body, run);
+            appendStepPerformance(namespace, body, run);
             details.append(summary, body);
             return details;
     }
