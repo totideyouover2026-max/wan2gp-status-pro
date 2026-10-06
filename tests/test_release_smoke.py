@@ -2345,6 +2345,20 @@ const reusedTiming={...bEncode,execution_epoch:9};
 direct.runTelemetry=t(B,"Encoding Prompt",{stage_timing:reusedTiming});api.syncRunTelemetry(direct);
 ok(direct.activeRun&&direct.activeRun._stageTimingEpoch===9&&direct.state.currentId==="encode",
  "reused task ID retained completed timing");
+const extra={state:api.freshState(),source,container:ns.container,download:ns.download,
+ historyRecording:false,runHistory:[],sessionRunIds:new Set(),sessionId:"extra",lastExecutingTaskKey:"",
+ lastExecutionProgressSignature:"",progressEpochReady:true};
+extra.runTelemetry=t(A,"Saving",{sample_no:1,output_records:[{path:"first.mp4",settings:{}}]});
+api.syncRunTelemetry(extra);api.applySnapshot(extra,api.readLiveSnapshot(extra));
+ok(extra.state.currentId==="save"&&extra.activeRun.sample_no===1,"first sample was not tracked");
+extra.runTelemetry=t(A,"Preparing",{sample_no:2,server_time:20,
+ output_records:[{path:"first.mp4",settings:{}}]});api.syncRunTelemetry(extra);
+ok(extra.activeRun&&extra.activeRun.sample_no===2&&extra.state.currentId==="prepare"&&
+ !extra.state.records.save.hasRun,"One More inherited the first sample's Save stage");
+extra.runTelemetry=t(A,"Encoding Text Prompt",{sample_no:2,server_time:21,
+ output_records:[{path:"first.mp4",settings:{}}]});api.syncRunTelemetry(extra);
+const extraSnapshot=api.readLiveSnapshot(extra);api.applySnapshot(extra,extraSnapshot);
+ok(extraSnapshot.id==="encode"&&extra.state.currentId==="encode","One More did not resume stage tracking");
 const legacy={...t(A,"Preparing")};delete legacy.execution_task_known;delete legacy.executing_task;
 legacy.active_task=A;ns.activeRun=null;sync(legacy);ok(ns.activeRun.queue_task_id==="A","legacy fallback regressed");
 """
@@ -2436,6 +2450,13 @@ const sparseOutcome={task_id:"A",execution_epoch:21,known:true,success:true,abor
  output_records:[{path:"outputs/a.png",settings:{prompt:"A"}}]};
 ok(api.reconcileTaskOutcomes(history,{task_outcomes:[sparseOutcome]})===false,
  "normalized media fields caused repeated history renders");
+const samples={historyRecording:false,activeRun:{queue_task_id:"S",_stageTimingEpoch:31,sample_no:2},runHistory:[
+ {id:"sample-1",queue_task_id:"S",execution_epoch:31,sample_no:1,status:"completed",settings:{},
+  stages:{},outputs:["first.mp4"],output_records:[{path:"first.mp4",settings:{}}]}
+]};
+api.reconcileTaskOutcomes(samples,{task_outcomes:[{task_id:"S",execution_epoch:31,known:true,
+ success:true,aborted:false,output_records:[{path:"first.mp4",settings:{}},{path:"second.mp4",settings:{}}]}]});
+ok(samples.runHistory[0].outputs.join()==="first.mp4","later sample output leaked into first sample history");
 '''
         result = subprocess.run([node, "-"], input=javascript + "\n" + script,
                                 text=True, encoding="utf-8", capture_output=True, check=False)

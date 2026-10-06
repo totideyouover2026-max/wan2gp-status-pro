@@ -278,6 +278,7 @@ class _StageTimingTelemetry:
         self._execution_epoch = 0
         self._task_finished = False
         self._window_no = None
+        self._sample_no = None
         self._retired_task_ids = set()
 
     @staticmethod
@@ -315,6 +316,7 @@ class _StageTimingTelemetry:
             self._active_since = None
             self._last_stage = None
             self._window_no = None
+            self._sample_no = None
             self._execution_epoch += 1
             self._revision += 1
             self._observe_stage_locked("prepare", now)
@@ -344,6 +346,33 @@ class _StageTimingTelemetry:
             self._stages = {}
             self._last_stage = None
             self._window_no = number
+            self._revision += 1
+            self._observe_stage_locked("prepare", now)
+            return True
+
+    def observe_sample(self, task_id, sample_no, now=None, execution_epoch=None):
+        """Start stage timing for another sample in the same WanGP task."""
+        try:
+            number = int(sample_no)
+        except (TypeError, ValueError):
+            return False
+        if number < 1:
+            return False
+        now = self._now(now)
+        with self._lock:
+            if self._task_id != str(task_id) or (execution_epoch is not None and
+                    self._execution_epoch != int(execution_epoch)):
+                return False
+            if self._sample_no is None:
+                self._sample_no = number
+                return False
+            if number <= self._sample_no:
+                return False
+            self._close_active(now)
+            self._stages = {}
+            self._last_stage = None
+            self._window_no = None
+            self._sample_no = number
             self._revision += 1
             self._observe_stage_locked("prepare", now)
             return True
@@ -1609,6 +1638,7 @@ class StatusProPlugin(WAN2GPPlugin):
             def observed_callback(*callback_args, **callback_kwargs):
                 nonlocal last_step_at, last_skip_count, phase_index, next_sequence, current_total
                 if stage_timing is not None:
+                    stage_timing.observe_sample(task_id, gen.get("repeat_no"), execution_epoch=execution_epoch)
                     stage_timing.observe_window(task_id, gen.get("window_no"), execution_epoch=execution_epoch)
                 progress_unit = callback_kwargs.get("progress_unit", callback_args[8] if len(callback_args) > 8 else None)
                 # IndexTTS reports segment progress with read_state=True, which
@@ -1762,6 +1792,7 @@ class StatusProPlugin(WAN2GPPlugin):
                 @wraps(send_cmd)
                 def observed_send_cmd(command, data=None, *send_args, **send_kwargs):
                     state_gen = state.get("gen") if isinstance(state, dict) and isinstance(state.get("gen"), dict) else {}
+                    self._stage_timing.observe_sample(task_id, state_gen.get("repeat_no"), execution_epoch=execution_epoch)
                     self._stage_timing.observe_window(task_id, state_gen.get("window_no"), execution_epoch=execution_epoch)
                     phase = data
                     if command == "progress" and isinstance(data, (list, tuple)) and len(data) > 1:
@@ -1897,6 +1928,7 @@ class StatusProPlugin(WAN2GPPlugin):
                 self._active_task_id = active_task.get("id")
                 timing_task_id = self._active_task_id
                 timing_epoch = self._stage_timing.start_task(timing_task_id)
+                self._stage_timing.observe_sample(timing_task_id, gen.get("repeat_no"), execution_epoch=timing_epoch)
                 self._stage_timing.observe_window(timing_task_id, gen.get("window_no"), execution_epoch=timing_epoch)
                 native_phase = _native_progress_snapshot(gen).get("phase")
                 _recover_polled_stage_timing(
@@ -1951,6 +1983,8 @@ class StatusProPlugin(WAN2GPPlugin):
                 "active_task": active_task,
                 "sliding_window": bool(gen.get("sliding_window")),
                 "window_no": _telemetry_value(gen.get("window_no")),
+                "sample_no": _telemetry_value(gen.get("repeat_no")),
+                "total_samples": _telemetry_value(gen.get("total_generation")),
                 "total_windows": _telemetry_value(gen.get("total_windows")),
                 "video_outputs": [record["path"] for record in video_records],
                 "audio_outputs": [record["path"] for record in audio_records],
@@ -5294,6 +5328,16 @@ class StatusProPlugin(WAN2GPPlugin):
         return Number.isFinite(run && run.window_no) && Number.isFinite(next.number) && next.number > run.window_no;
     }
 
+    function sampleNumber(telemetry) {
+        const number = optionalNumber(telemetry && telemetry.sample_no);
+        return Number.isFinite(number) && number > 0 ? Math.floor(number) : null;
+    }
+
+    function isNextSample(run, telemetry) {
+        const next = sampleNumber(telemetry);
+        return Number.isFinite(next) && Number.isFinite(run && run.sample_no) && next > run.sample_no;
+    }
+
     function windowPromptFor(task, windowNo) {
         const prompts = task && Array.isArray(task.window_prompts) ? task.window_prompts : [];
         if (Number.isFinite(windowNo) && prompts.length) {
@@ -5495,7 +5539,18 @@ class StatusProPlugin(WAN2GPPlugin):
                 run.failure_reason = run.status_reason;
                 changed = true;
             }
-            const records = Array.isArray(outcome.output_records) ? cloneJson(outcome.output_records, []) : [];
+            const sameExecutionRuns = namespace.runHistory.filter(item =>
+                String(item.queue_task_id) === String(run.queue_task_id) &&
+                optionalNumber(item.execution_epoch) === optionalNumber(run.execution_epoch));
+            let records = Array.isArray(outcome.output_records) ? cloneJson(outcome.output_records, []) : [];
+            const newerActiveSample = namespace.activeRun &&
+                String(namespace.activeRun.queue_task_id) === String(run.queue_task_id) &&
+                optionalNumber(namespace.activeRun._stageTimingEpoch) === optionalNumber(run.execution_epoch) &&
+                optionalNumber(namespace.activeRun.sample_no) > optionalNumber(run.sample_no);
+            if (sameExecutionRuns.length > 1 || newerActiveSample) {
+                const paths = new Set((run.outputs || []).map(path => String(path)));
+                records = records.filter(record => paths.has(String(record.path || "")));
+            }
             if (records.length) {
                 const existing = new Map((run.output_records || []).map(record => [String(record.path || ""), record]));
                 records.forEach(record => {
@@ -6220,7 +6275,8 @@ class StatusProPlugin(WAN2GPPlugin):
             output_baseline: Number.isFinite(options.outputBaseline)
                 ? options.outputBaseline
                 : currentOutputRecords(telemetry).length,
-            repeats: optionalNumber(task && task.repeats) || 1,
+            repeats: sampleNumber(telemetry) ? 1 : (optionalNumber(task && task.repeats) || 1),
+            sample_no: Number.isFinite(options.sampleNo) ? options.sampleNo : (sampleNumber(telemetry) || 1),
             window_no: window.number,
             total_windows: window.total,
             window_prompt: windowPrompt,
@@ -6248,7 +6304,8 @@ class StatusProPlugin(WAN2GPPlugin):
             namespace.activeRun.settings.prompt = namespace.activeRun.window_prompt;
         }
         if (telemetry && telemetry.wangp_version) namespace.activeRun.wangp_version = String(telemetry.wangp_version);
-        namespace.activeRun.repeats = optionalNumber(task.repeats) || namespace.activeRun.repeats || 1;
+        namespace.activeRun.repeats = sampleNumber(telemetry) ? 1 :
+            (optionalNumber(task.repeats) || namespace.activeRun.repeats || 1);
         const window = windowDetails(telemetry);
         if (!Number.isFinite(namespace.activeRun.window_no) && Number.isFinite(window.number)) {
             namespace.activeRun.window_no = window.number;
@@ -6298,9 +6355,12 @@ class StatusProPlugin(WAN2GPPlugin):
         const outputLimit = Number.isFinite(outputEnd)
             ? Math.min(Math.max(outputStart, Math.floor(outputEnd)), outputRecords.length)
             : outputRecords.length;
-        const completedOutputRecords = taskOutcome
-            ? cloneJson(taskOutcome.output_records, [])
-            : outputRecords.slice(outputStart, outputLimit);
+        const windowOutputs = outputRecords.slice(outputStart, outputLimit);
+        const outcomeOutputs = taskOutcome ? cloneJson(taskOutcome.output_records, []) : [];
+        const ownedPaths = new Set(windowOutputs.map(record => String(record.path || "")));
+        const completedOutputRecords = taskOutcome && outcomeOutputs.length
+            ? (ownedPaths.size ? outcomeOutputs.filter(record => ownedPaths.has(String(record.path || ""))) : outcomeOutputs)
+            : windowOutputs;
         const fallbackOutcome = run.outcome_status || status || "completed";
         const outcome = status === "window" ? "window" : authoritativeOutcomeStatus(taskOutcome, fallbackOutcome);
         const unsuccessful = !["completed", "window"].includes(outcome);
@@ -6405,6 +6465,24 @@ class StatusProPlugin(WAN2GPPlugin):
         }
     }
 
+    function splitNextSample(namespace, task, telemetry, now) {
+        const run = namespace.activeRun;
+        if (!run || !isNextSample(run, telemetry)) return false;
+        const outputRecords = currentOutputRecords(telemetry);
+        const boundary = outputRecords.length
+            ? outputBoundaryTime(run, outputRecords[outputRecords.length - 1], now)
+            : now;
+        run.completed_at = boundary;
+        finishRun(namespace, "completed", boundary, telemetry, outputRecords.length);
+        startRun(namespace, task, telemetry, {
+            startedAt: boundary,
+            outputBaseline: outputRecords.length,
+            sampleNo: sampleNumber(telemetry)
+        });
+        namespace.progressEpochReady = false;
+        return true;
+    }
+
     function syncRunTelemetry(namespace) {
         const telemetry = readRunSnapshot(namespace);
         if (!telemetry || telemetry.error || typeof telemetry.in_progress !== "boolean") return;
@@ -6449,6 +6527,7 @@ class StatusProPlugin(WAN2GPPlugin):
                     ownedTiming.last_stage !== "prepare");
             if (namespace.activeRun && namespace.progressEpochReady === false &&
                 (progressSignature !== previousSignature || freshOwnedStage)) namespace.progressEpochReady = true;
+            if (namespace.activeRun && activeKey === nextKey) splitNextSample(namespace, task, telemetry, now);
             splitMissedSlidingWindows(namespace, task, telemetry, now);
             if (namespace.activeRun && isNextSlidingWindow(namespace.activeRun, telemetry)) {
                 finishRun(namespace, "window", now, telemetry);
