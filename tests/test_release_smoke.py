@@ -1526,7 +1526,7 @@ if (completion.latestFinishedAt !== 52000 || completion.latestDuration !== 12) t
         self.assertIn('if (namespace.historyRecording === false)', javascript_source)
         self.assertIn('repeating-linear-gradient', javascript_source)
         self.assertIn('chip.dataset.stage = timingStageId', javascript_source)
-        self.assertIn('completed ? `${formatDuration(latestDuration)}` : ""', javascript_source)
+        self.assertIn('completed ? `Last run ${formatDuration(latestDuration)}` : ""', javascript_source)
         self.assertIn('filterToggle.setAttribute("role", "switch")', javascript_source)
         self.assertIn('Recorded data and exports are unchanged.', javascript_source)
         self.assertIn('row.hidden = hideSkipped && row.dataset.skipped === "true"', javascript_source)
