@@ -59,6 +59,8 @@ The detail panel can also identify the model components involved in a stage—fo
 
 ![Decode shown as an active indeterminate stage](<Screenshots/2 -Decode (can't give ETA).png>)
 
+H3 two-phase generation reports the intermediate model handoff and latent upscaling in **Enhance**, followed by **Encode** for phase-two prompt/reference conditioning and **Generate** for the second pass. Latent upscaler progress uses **layers**, separate from denoising steps. Final media decoding uses **Decode**.
+
 ## Understanding the timing information
 
 - **Stage elapsed** appears on the selected stage card and in its activity details. **Total elapsed** appears in the header, including when the panel is collapsed.
@@ -284,7 +286,7 @@ Status Pro observes WanGP from the browser at short intervals. Small differences
 
 ### What happens if WanGP is minimized during generation?
 
-Browsers can pause or heavily throttle live page timers while a window is minimized. When the page resumes, Status Pro recovers missed Generate and LTX refinement timing, steps, and subwindow phases from WanGP callbacks retained by the plugin backend. If the task already finished, its completion and total duration are anchored to WanGP's reported queue duration or output creation time, so the idle gap before the window is restored is excluded. Prepare or Encode work that emitted no durable callback is marked **Not reported** rather than being assigned an invented duration. Previously retained records with an inflated resume-time completion are repaired automatically when their output metadata contains a trustworthy timestamp.
+Browsers and Pinokio can pause or throttle page timers while a window is minimized. Status Pro records stage timings and execution start/completion times in WanGP's generation worker independently of those page timers. On visibility or focus restoration it requests a fresh backend snapshot and applies the recorded stages before finalizing History. It can also restore runs and windows that completed without a page update, using the most recent 16 task executions retained in backend memory. The wait before refocusing is excluded from completed-run timing. Rendering may still pause while hidden; this does not stop worker timing collection. Work without an observable phase boundary remains unreported rather than receiving an invented duration.
 
 ### Why are there more step observations than configured steps?
 
