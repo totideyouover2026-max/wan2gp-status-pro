@@ -59,6 +59,8 @@ The detail panel can also identify the model components involved in a stage—fo
 
 ![Decode shown as an active indeterminate stage](<Screenshots/2 -Decode (can't give ETA).png>)
 
+PiD postprocessing keeps model loading, VAE encoding and sampling in **Enhance**, both during generation and when applied to an existing output. Its VAE encoding callback has no tile counter, so this part shows its activity and elapsed time without a percentage.
+
 H3 two-phase generation reports the intermediate model handoff and latent upscaling in **Enhance**, followed by **Encode** for phase-two prompt/reference conditioning and **Generate** for the second pass. Latent upscaler progress uses **layers**, separate from denoising steps. Final media decoding uses **Decode**.
 
 ## Understanding the timing information
