@@ -174,6 +174,15 @@ python -m unittest discover -s tests -v
 
 Node.js is optional but recommended; JavaScript-specific tests are skipped when it is unavailable.
 
+The optional upstream compatibility audit runs WanGP's actual dispatcher functions with synthetic handlers, without loading GPU models:
+
+```powershell
+python -B tests/upstream_enhancement_audit.py
+```
+
+This explicit audit reads WanGP `main` from GitHub. Use `--ref COMMIT` to pin a revision, or `--upstream-root PATH` for an offline checkout. Normal unittest discovery has no network dependency.
+
+
 ## Privacy and local storage
 
 Run history never leaves the browser and can be cleared from Status Pro. **Until browser tab closes** uses browser `sessionStorage`. **Until WanGP restarts** uses local storage plus a unique backend launch ID, and clears when Status Pro detects a new WanGP process. **Until manually cleared** remains available across both browser and WanGP restarts. When page-session prompt memory is enabled, prompt text can remain available only within the browser-tab session and is unchecked in exports by default; it is never added to the WanGP-runtime or manually-cleared stores. Output paths and detailed model settings may be present in Standard or Reproducibility exports; use the Share-safe preset when publishing an export.

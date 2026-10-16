@@ -839,9 +839,10 @@ for (const preset of ["performance", "reproducibility", "share-safe"]) {
                 "_latest_performance_snapshot",
                 "_new_performance_observer",
                 "_observe_postprocessing_progress",
+                "_forward_processor_progress",
             )
         ]
-        namespace = {"time": time, "_PROCESS": None}
+        namespace = {"time": time, "inspect": inspect, "_PROCESS": None}
         module = ast.Module(body=[*constants, *helpers], type_ignores=[])
         ast.fix_missing_locations(module)
         exec(compile(module, str(PLUGIN_PATH), "exec"), namespace)

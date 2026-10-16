@@ -59,7 +59,7 @@ The detail panel can also identify the model components involved in a stage—fo
 
 ![Decode shown as an active indeterminate stage](<Screenshots/2 -Decode (can't give ETA).png>)
 
-PiD postprocessing keeps model loading, VAE encoding and sampling in **Enhance**, both during generation and when applied to an existing output. Its VAE encoding callback has no tile counter, so this part shows its activity and elapsed time without a percentage.
+Registered enhancement operations keep model loading and their internal preprocessing, prompt encoding, sampling and decoding in **Enhance**, both during generation and when applied to an existing output. This includes spatial/temporal upscalers, refinement, soundtrack generation, voice processing, audio cleanup and film grain. Processor names come from WanGP's registry. Missing progress counters show activity and elapsed time without an invented percentage. VAE-based upscalers also use Enhance; early upscaler preparation returns to the generation pipeline when it finishes.
 
 H3 two-phase generation reports the intermediate model handoff and latent upscaling in **Enhance**, followed by **Encode** for phase-two prompt/reference conditioning and **Generate** for the second pass. Latent upscaler progress uses **layers**, separate from denoising steps. Final media decoding uses **Decode**.
 
