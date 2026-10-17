@@ -1,4 +1,17 @@
-# Status Pro v1.2.2
+# Status Pro v1.3.0
+
+Status Pro 1.3.0 improves enhancement-stage tracking, background timing recovery and voice/audio activity reporting.
+
+- Track registered spatial/temporal upscalers, VAE upscaling, refinement, soundtrack generation, voice processing, audio cleanup and film grain in Enhance, including model loading and internal encode/decode work.
+- Show H3's inter-pass model handoff and latent upscaling in Enhance, with clearer second-phase transitions.
+- Recover stage timing after the window is minimized or unfocused, without assigning hidden work or the refocus delay to Prepare.
+- Correct Qwen 2.1 tile totals and suppress misleading Decode percentages from stale or invalid counters.
+- Keep streaming voice/audio updates in one activity while preserving real parts, segments and passes; retain actual counters when an activity ends.
+- Improve ownership across queued jobs and repeated task IDs, with broader regression coverage and an audit against upstream WanGP dispatcher APIs.
+
+Status Lite includes the corresponding live-status fixes. Status Pro also retains recovered timings and stable activity rows in History and exports.
+
+## Status Pro v1.2.2
 
 Status Pro 1.2.2 keeps H3 RefMod preview decoding in Encode and tracks each additional sample requested with One More. History keeps Step observations open during updates and no longer shortens a run using output timing that predates observed work. Status Lite includes the live-stage fixes.
 
